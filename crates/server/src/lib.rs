@@ -138,6 +138,226 @@ pub fn body(req: &mut Request) -> Result<Value, Fail> {
     serde_json::from_slice(&raw).map_err(|_| Fail::new(400, "bad body"))
 }
 
+/// The trailing path segment, for routes shaped /api/thing/:id.
+fn tail<'a>(path: &'a str, prefix: &str) -> Option<&'a str> {
+    path.strip_prefix(prefix)
+        .filter(|r| !r.is_empty() && !r.contains('/'))
+}
+
+fn need_str(v: &Value, key: &str) -> Result<String, Fail> {
+    let s = v
+        .get(key)
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if s.is_empty() {
+        return Err(Fail::new(400, format!("{key} is required")));
+    }
+    Ok(s)
+}
+
+/// A finite number, or a 400.
+///
+/// as_f64 rejects a string and a null for us; the is_finite check is what stops a NaN or an
+/// infinity reaching the store, where it would silently poison every total that touches it.
+fn need_f64(v: &Value, key: &str) -> Result<f64, Fail> {
+    let n = v
+        .get(key)
+        .and_then(|x| x.as_f64())
+        .ok_or_else(|| Fail::new(400, format!("{key} must be a number")))?;
+    if !n.is_finite() {
+        return Err(Fail::new(400, format!("{key} must be a real number")));
+    }
+    Ok(n)
+}
+
+fn load(ctx: &Ctx) -> Result<meridian_core::types::Store, Fail> {
+    store::load(&ctx.cfg).map_err(|e| Fail::new(500, e.to_string()))
+}
+
+fn commit(ctx: &Ctx, s: &meridian_core::types::Store) -> Result<(), Fail> {
+    store::save(&ctx.cfg, s).map_err(|e| Fail::new(500, e.to_string()))
+}
+
+fn create_portfolio(ctx: &Ctx, b: &Value) -> Out {
+    let name = need_str(b, "name")?;
+    let mut s = load(ctx)?;
+    let p = meridian_core::types::Portfolio {
+        id: meridian_core::types::new_id('p'),
+        name,
+        owner: b
+            .get("owner")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string(),
+        band_pct: b.get("band_pct").and_then(|x| x.as_f64()).unwrap_or(3.0),
+        holdings: Vec::new(),
+    };
+    let id = p.id.clone();
+    s.portfolios.push(p);
+    commit(ctx, &s)?;
+    Ok(json!({ "id": id }))
+}
+
+fn patch_portfolio(ctx: &Ctx, id: &str, b: &Value) -> Out {
+    let mut s = load(ctx)?;
+    if b.get("delete").and_then(|d| d.as_bool()).unwrap_or(false) {
+        let before = s.portfolios.len();
+        s.portfolios.retain(|p| p.id != id);
+        if s.portfolios.len() == before {
+            return Err(Fail::new(404, "no such portfolio"));
+        }
+        commit(ctx, &s)?;
+        return Ok(json!({ "ok": true }));
+    }
+    let p = s
+        .portfolios
+        .iter_mut()
+        .find(|p| p.id == id)
+        .ok_or_else(|| Fail::new(404, "no such portfolio"))?;
+    if b.get("name").is_some() {
+        p.name = need_str(b, "name")?;
+    }
+    if let Some(o) = b.get("owner").and_then(|x| x.as_str()) {
+        p.owner = o.to_string();
+    }
+    if b.get("band_pct").is_some() {
+        let band = need_f64(b, "band_pct")?;
+        if !(0.0..=100.0).contains(&band) {
+            return Err(Fail::new(400, "band_pct must be between 0 and 100"));
+        }
+        p.band_pct = band;
+    }
+    commit(ctx, &s)?;
+    Ok(json!({ "ok": true }))
+}
+
+fn put_holding(ctx: &Ctx, b: &Value) -> Out {
+    let pid = need_str(b, "portfolio_id")?;
+    let ticker = need_str(b, "ticker")?.to_uppercase();
+    let shares = need_f64(b, "shares")?;
+    let cost = need_f64(b, "cost_basis")?;
+    let target = need_f64(b, "target_pct")?;
+    // ponytail: no shorts, no negative cost. Both are real instruments and neither is something
+    // this app models; accepting them would make every weight and drift figure nonsense.
+    if shares < 0.0 {
+        return Err(Fail::new(400, "shares cannot be negative"));
+    }
+    if cost < 0.0 {
+        return Err(Fail::new(400, "cost_basis cannot be negative"));
+    }
+    if !(0.0..=100.0).contains(&target) {
+        return Err(Fail::new(400, "target_pct must be between 0 and 100"));
+    }
+    let mut s = load(ctx)?;
+    let base = s.base_currency.clone();
+    let p = s
+        .portfolios
+        .iter_mut()
+        .find(|p| p.id == pid)
+        .ok_or_else(|| Fail::new(404, "no such portfolio"))?;
+    let id = b.get("id").and_then(|x| x.as_str()).map(str::to_string);
+    let h = meridian_core::types::Holding {
+        id: id
+            .clone()
+            .unwrap_or_else(|| meridian_core::types::new_id('h')),
+        ticker,
+        name: b
+            .get("name")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string(),
+        cls: b
+            .get("cls")
+            .and_then(|x| x.as_str())
+            .unwrap_or("Uncategorised")
+            .to_string(),
+        shares,
+        cost_basis: cost,
+        cost_currency: b
+            .get("cost_currency")
+            .and_then(|x| x.as_str())
+            .unwrap_or(&base)
+            .to_uppercase(),
+        target_pct: target,
+    };
+    let out = json!({ "id": h.id });
+    match p.holdings.iter_mut().find(|x| Some(&x.id) == id.as_ref()) {
+        Some(existing) => *existing = h,
+        None => p.holdings.push(h),
+    }
+    commit(ctx, &s)?;
+    Ok(out)
+}
+
+fn delete_holding(ctx: &Ctx, id: &str) -> Out {
+    let mut s = load(ctx)?;
+    let mut hit = false;
+    for p in &mut s.portfolios {
+        let before = p.holdings.len();
+        p.holdings.retain(|h| h.id != id);
+        hit |= p.holdings.len() != before;
+    }
+    if !hit {
+        return Err(Fail::new(404, "no such holding"));
+    }
+    commit(ctx, &s)?;
+    Ok(json!({ "ok": true }))
+}
+
+/// Refetch every held symbol and every fx pair the store needs.
+///
+/// A symbol that fails keeps whatever was cached, so a partial outage costs freshness, not data.
+/// The failures come back by name so the page can say which rows it could not price.
+fn refresh(ctx: &Ctx) -> Out {
+    let s = load(ctx)?;
+    let mut wanted: Vec<String> = s
+        .portfolios
+        .iter()
+        .flat_map(|p| p.holdings.iter().map(|h| h.ticker.clone()))
+        .collect();
+    wanted.sort();
+    wanted.dedup();
+    let mut cache = ctx.cache.lock().expect("cache lock").clone();
+    let mut failed = Vec::new();
+    for sym in &wanted {
+        match quotes::fetch(sym) {
+            Some(q) => {
+                cache.insert(sym.clone(), q);
+            }
+            None => failed.push(sym.clone()),
+        }
+    }
+    // Which fx pairs are needed is only knowable once the quotes say which currencies are in play.
+    let mut pairs: Vec<String> = cache
+        .values()
+        .filter_map(|q| quotes::fx_symbol(&q.currency, &s.base_currency))
+        .collect();
+    for h in s.portfolios.iter().flat_map(|p| p.holdings.iter()) {
+        if let Some(p) = quotes::fx_symbol(&h.cost_currency, &s.base_currency) {
+            pairs.push(p);
+        }
+    }
+    pairs.sort();
+    pairs.dedup();
+    for pair in &pairs {
+        if let Some(q) = quotes::fetch(pair) {
+            cache.insert(pair.clone(), q);
+        }
+    }
+    let _ = quotes::save(&ctx.cfg, &cache);
+    *ctx.cache.lock().expect("cache lock") = cache;
+    Ok(json!({ "fetched": wanted.len(), "failed": failed }))
+}
+
+fn search(ctx: &Ctx, query: &str) -> Out {
+    if query.trim().is_empty() {
+        return Ok(json!({ "hits": [] }));
+    }
+    Ok(json!({ "hits": quotes::search(query, ctx.cfg.scope) }))
+}
+
 fn handle(ctx: &Ctx, token: &str, req: Request) {
     let url = req.url().to_string();
     let (path, _raw_query) = url.split_once('?').unwrap_or((url.as_str(), ""));
@@ -153,8 +373,36 @@ fn handle(ctx: &Ctx, token: &str, req: Request) {
     if !same_token(&header(&req, "X-Meridian-Token"), token) {
         return send_json(req, 401, json!({ "error": "bad token" }));
     }
+    let query: std::collections::HashMap<String, String> = _raw_query
+        .split('&')
+        .filter(|p| !p.is_empty())
+        .map(|p| {
+            let (k, v) = p.split_once('=').unwrap_or((p, ""));
+            let dec = |s: &str| {
+                urlencoding::decode(&s.replace('+', " "))
+                    .map(|c| c.into_owned())
+                    .unwrap_or_else(|_| s.to_string())
+            };
+            (dec(k), dec(v))
+        })
+        .collect();
+
+    let mut req = req;
     let out: Out = match (req.method().as_str(), path.as_str()) {
         ("GET", "/api/state") => state(ctx),
+        ("GET", "/api/search") => search(ctx, query.get("q").map(String::as_str).unwrap_or("")),
+        ("POST", "/api/refresh") => refresh(ctx),
+        ("POST", "/api/portfolio") => body(&mut req).and_then(|b| create_portfolio(ctx, &b)),
+        ("POST", "/api/holding") => body(&mut req).and_then(|b| put_holding(ctx, &b)),
+        ("PATCH", p) if tail(p, "/api/portfolio/").is_some() => {
+            let id = tail(p, "/api/portfolio/")
+                .expect("checked just above")
+                .to_string();
+            body(&mut req).and_then(|b| patch_portfolio(ctx, &id, &b))
+        }
+        ("DELETE", p) if tail(p, "/api/holding/").is_some() => {
+            delete_holding(ctx, tail(p, "/api/holding/").expect("checked just above"))
+        }
         _ => Err(Fail::new(404, "not found")),
     };
     match out {
@@ -272,6 +520,265 @@ mod tests {
             .expect("build");
         let r = ureq::run(req).expect("preflight");
         assert_eq!(r.status().as_u16(), 204);
+    }
+
+    fn call(port: u16, method: &str, path: &str, token: &str, body: Value) -> (u16, Value) {
+        let url = format!("http://127.0.0.1:{port}{path}");
+        let res = match method {
+            "POST" => ureq::post(&url)
+                .header("X-Meridian-Token", token)
+                .send_json(body),
+            "PATCH" => ureq::patch(&url)
+                .header("X-Meridian-Token", token)
+                .send_json(body),
+            "DELETE" => ureq::delete(&url).header("X-Meridian-Token", token).call(),
+            _ => ureq::get(&url).header("X-Meridian-Token", token).call(),
+        };
+        match res {
+            Ok(mut r) => (
+                r.status().as_u16(),
+                r.body_mut().read_json().unwrap_or(Value::Null),
+            ),
+            Err(ureq::Error::StatusCode(c)) => (c, Value::Null),
+            Err(e) => panic!("request failed: {e}"),
+        }
+    }
+
+    fn with_portfolio(port: u16, t: &str) -> String {
+        let (_, p) = call(port, "POST", "/api/portfolio", t, json!({"name": "A"}));
+        p["id"].as_str().expect("an id").to_string()
+    }
+
+    #[test]
+    fn a_created_portfolio_comes_back_in_state() {
+        let (_d, port, t) = up();
+        let (code, v) = call(
+            port,
+            "POST",
+            "/api/portfolio",
+            &t,
+            json!({"name": "Balanced"}),
+        );
+        assert_eq!(code, 200);
+        let id = v["id"].as_str().expect("an id").to_string();
+        assert!(id.starts_with("p_"));
+        let (_, s) = call(port, "GET", "/api/state", &t, Value::Null);
+        assert_eq!(s["portfolios"][0]["name"], "Balanced");
+        assert_eq!(s["portfolios"][0]["id"], id);
+        assert_eq!(
+            s["portfolios"][0]["band_pct"], 3.0,
+            "the design's default band"
+        );
+    }
+
+    #[test]
+    fn a_patch_renames_without_touching_the_holdings() {
+        let (_d, port, t) = up();
+        let pid = with_portfolio(port, &t);
+        call(
+            port,
+            "POST",
+            "/api/holding",
+            &t,
+            json!({
+            "portfolio_id": pid, "ticker": "EQNR.OL", "name": "Equinor", "cls": "Equity",
+            "shares": 10.0, "cost_basis": 2500.0, "cost_currency": "NOK", "target_pct": 100.0}),
+        );
+        let (code, _) = call(
+            port,
+            "PATCH",
+            &format!("/api/portfolio/{pid}"),
+            &t,
+            json!({"name": "B", "band_pct": 5.0}),
+        );
+        assert_eq!(code, 200);
+        let (_, s) = call(port, "GET", "/api/state", &t, Value::Null);
+        assert_eq!(s["portfolios"][0]["name"], "B");
+        assert_eq!(s["portfolios"][0]["band_pct"], 5.0);
+        assert_eq!(
+            s["portfolios"][0]["holdings"]
+                .as_array()
+                .expect("arr")
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_portfolio_can_be_deleted() {
+        let (_d, port, t) = up();
+        let pid = with_portfolio(port, &t);
+        let (code, _) = call(
+            port,
+            "PATCH",
+            &format!("/api/portfolio/{pid}"),
+            &t,
+            json!({"delete": true}),
+        );
+        assert_eq!(code, 200);
+        let (_, s) = call(port, "GET", "/api/state", &t, Value::Null);
+        assert!(s["portfolios"].as_array().expect("arr").is_empty());
+        let (again, _) = call(
+            port,
+            "PATCH",
+            &format!("/api/portfolio/{pid}"),
+            &t,
+            json!({"delete": true}),
+        );
+        assert_eq!(again, 404, "deleting it twice is not a silent success");
+    }
+
+    #[test]
+    fn posting_a_holding_with_an_existing_id_updates_it_rather_than_duplicating() {
+        let (_d, port, t) = up();
+        let pid = with_portfolio(port, &t);
+        let mk = |shares: f64, id: Value| {
+            json!({
+            "id": id, "portfolio_id": pid, "ticker": "EQNR.OL", "name": "Equinor",
+            "cls": "Equity", "shares": shares, "cost_basis": 2500.0,
+            "cost_currency": "NOK", "target_pct": 100.0})
+        };
+        let (_, h) = call(port, "POST", "/api/holding", &t, mk(10.0, Value::Null));
+        let hid = h["id"].as_str().expect("id").to_string();
+        call(port, "POST", "/api/holding", &t, mk(20.0, json!(hid)));
+        let (_, s) = call(port, "GET", "/api/state", &t, Value::Null);
+        let hs = s["portfolios"][0]["holdings"].as_array().expect("arr");
+        assert_eq!(hs.len(), 1, "updated, not duplicated");
+        assert_eq!(hs[0]["shares"], 20.0);
+    }
+
+    #[test]
+    fn a_ticker_is_stored_uppercased_so_the_cache_key_always_matches() {
+        let (_d, port, t) = up();
+        let pid = with_portfolio(port, &t);
+        call(
+            port,
+            "POST",
+            "/api/holding",
+            &t,
+            json!({
+            "portfolio_id": pid, "ticker": "eqnr.ol", "name": "Equinor", "cls": "Equity",
+            "shares": 1.0, "cost_basis": 1.0, "cost_currency": "nok", "target_pct": 100.0}),
+        );
+        let (_, s) = call(port, "GET", "/api/state", &t, Value::Null);
+        assert_eq!(s["portfolios"][0]["holdings"][0]["ticker"], "EQNR.OL");
+    }
+
+    #[test]
+    fn deleting_a_holding_removes_only_that_one() {
+        let (_d, port, t) = up();
+        let pid = with_portfolio(port, &t);
+        let add = |ticker: &str| {
+            json!({
+            "portfolio_id": pid, "ticker": ticker, "name": ticker, "cls": "Equity",
+            "shares": 1.0, "cost_basis": 1.0, "cost_currency": "NOK", "target_pct": 50.0})
+        };
+        let (_, a) = call(port, "POST", "/api/holding", &t, add("EQNR.OL"));
+        call(port, "POST", "/api/holding", &t, add("AAPL"));
+        let aid = a["id"].as_str().expect("id").to_string();
+        let (code, _) = call(
+            port,
+            "DELETE",
+            &format!("/api/holding/{aid}"),
+            &t,
+            Value::Null,
+        );
+        assert_eq!(code, 200);
+        let (_, s) = call(port, "GET", "/api/state", &t, Value::Null);
+        let hs = s["portfolios"][0]["holdings"].as_array().expect("arr");
+        assert_eq!(hs.len(), 1);
+        assert_eq!(hs[0]["ticker"], "AAPL");
+    }
+
+    #[test]
+    fn deleting_something_that_is_not_there_is_a_404_not_a_silent_ok() {
+        let (_d, port, t) = up();
+        assert_eq!(
+            call(port, "DELETE", "/api/holding/h_nope", &t, Value::Null).0,
+            404
+        );
+    }
+
+    #[test]
+    fn a_holding_for_a_portfolio_that_does_not_exist_is_a_404() {
+        let (_d, port, t) = up();
+        let (code, _) = call(
+            port,
+            "POST",
+            "/api/holding",
+            &t,
+            json!({
+            "portfolio_id": "p_nope", "ticker": "EQNR.OL", "name": "E", "cls": "Equity",
+            "shares": 1.0, "cost_basis": 1.0, "cost_currency": "NOK", "target_pct": 50.0}),
+        );
+        assert_eq!(code, 404);
+    }
+
+    #[test]
+    fn a_portfolio_name_that_is_blank_is_refused() {
+        let (_d, port, t) = up();
+        assert_eq!(
+            call(port, "POST", "/api/portfolio", &t, json!({"name": "  "})).0,
+            400
+        );
+    }
+
+    #[test]
+    fn negative_shares_are_refused_because_this_app_does_not_do_shorts() {
+        let (_d, port, t) = up();
+        let pid = with_portfolio(port, &t);
+        let (code, _) = call(
+            port,
+            "POST",
+            "/api/holding",
+            &t,
+            json!({
+            "portfolio_id": pid, "ticker": "EQNR.OL", "name": "E", "cls": "Equity",
+            "shares": -5.0, "cost_basis": 1.0, "cost_currency": "NOK", "target_pct": 50.0}),
+        );
+        assert_eq!(code, 400);
+    }
+
+    #[test]
+    fn a_target_outside_zero_to_a_hundred_is_refused() {
+        let (_d, port, t) = up();
+        let pid = with_portfolio(port, &t);
+        let (code, _) = call(
+            port,
+            "POST",
+            "/api/holding",
+            &t,
+            json!({
+            "portfolio_id": pid, "ticker": "EQNR.OL", "name": "E", "cls": "Equity",
+            "shares": 1.0, "cost_basis": 1.0, "cost_currency": "NOK", "target_pct": 140.0}),
+        );
+        assert_eq!(code, 400);
+    }
+
+    #[test]
+    fn a_shares_value_that_is_not_a_number_is_refused_rather_than_stored_as_nan() {
+        let (_d, port, t) = up();
+        let pid = with_portfolio(port, &t);
+        for bad in [json!("ten"), json!(null)] {
+            let (code, _) = call(
+                port,
+                "POST",
+                "/api/holding",
+                &t,
+                json!({
+                "portfolio_id": pid, "ticker": "EQNR.OL", "name": "E", "cls": "Equity",
+                "shares": bad, "cost_basis": 1.0, "cost_currency": "NOK", "target_pct": 50.0}),
+            );
+            assert_eq!(code, 400, "a NaN here would poison every total");
+        }
+    }
+
+    #[test]
+    fn a_search_with_no_query_is_empty_without_reaching_the_network() {
+        let (_d, port, t) = up();
+        let (code, v) = call(port, "GET", "/api/search?q=", &t, Value::Null);
+        assert_eq!(code, 200);
+        assert!(v["hits"].as_array().expect("arr").is_empty());
     }
 
     #[test]
