@@ -4,6 +4,7 @@ import { Sidebar } from './Sidebar'
 import { Splash } from './Splash'
 import { Builder } from './screens/Builder'
 import { Dashboard } from './screens/Dashboard'
+import { Rebalance } from './screens/Rebalance'
 import { useApp } from './store'
 
 const TITLES: Record<string, [string, string]> = {
@@ -62,8 +63,9 @@ export function App() {
           <Dashboard />
         ) : screen === 'builder' ? (
           <Builder />
+        ) : screen === 'rebalance' ? (
+          <Rebalance />
         ) : (
-          // Rebalance lands in Task 14.
           <p className="text-muted">{title} is not built yet.</p>
         )}
       </main>

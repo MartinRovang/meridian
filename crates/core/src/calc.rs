@@ -261,13 +261,32 @@ pub fn trades(v: &PortfolioView, cash: f64) -> Result<Vec<Trade>, RebalanceError
     if (sum - 100.0).abs() > TARGET_TOLERANCE {
         return Err(RebalanceError::TargetsDoNotSum(sum));
     }
-    let pot = v.value + cash.max(0.0);
+    let cash = cash.max(0.0);
+    let pot = v.value + cash;
+    let want = |h: &HoldingView| pot * h.target_pct / 100.0 - h.value;
+
+    // In cash mode the sells are skipped, so the buys no longer net out against them and would
+    // total more than the cash on hand. Scaling them back to exactly the cash spends what there
+    // is, moving every underweight holding the same fraction of the way to its target.
+    let scale = if cash > 0.0 {
+        let wanted: f64 = priced.iter().map(|h| want(h)).filter(|d| *d > 0.0).sum();
+        if wanted > cash {
+            cash / wanted
+        } else {
+            1.0
+        }
+    } else {
+        1.0
+    };
+
     let mut out = Vec::new();
     for h in priced {
-        let want = pot * h.target_pct / 100.0;
-        let delta = want - h.value;
-        if cash > 0.0 && delta <= 0.0 {
-            continue; // cash mode never sells
+        let mut delta = want(h);
+        if cash > 0.0 {
+            if delta <= 0.0 {
+                continue; // cash mode never sells
+            }
+            delta *= scale;
         }
         if delta.abs() < MIN_TRADE || h.shares <= 0.0 {
             continue;
@@ -587,5 +606,27 @@ mod tests {
         assert!(!v.priced);
         assert_eq!(v.cost_basis, 1234.5);
         assert_eq!(v.cost_currency, "SEK");
+    }
+
+    #[test]
+    fn cash_mode_never_proposes_spending_more_cash_than_there_is() {
+        // 270 NOK of EQNR against 600 NOK of AAPL, both wanted at 50%. AAPL is overweight, so
+        // cash mode skips selling it, and the buy towards EQNR must still fit inside the cash.
+        let p = portfolio(
+            3.0,
+            vec![
+                holding("h1", "EQNR.OL", 1.0, 0.0, "NOK", 50.0),
+                holding("h2", "AAPL", 0.3, 0.0, "USD", 50.0),
+            ],
+        );
+        let v = view_portfolio(&p, "NOK", &cache());
+        let cash = 50.0;
+        let t = trades(&v, cash).expect("targets sum to 100");
+        assert!(
+            t.iter().all(|t| t.side == Side::Buy),
+            "cash mode never sells"
+        );
+        let spend: f64 = t.iter().map(|t| t.amount).sum();
+        assert!(spend <= cash + 0.01, "proposed spending {spend} of {cash}");
     }
 }

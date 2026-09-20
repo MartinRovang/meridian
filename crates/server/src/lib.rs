@@ -351,6 +351,26 @@ fn refresh(ctx: &Ctx) -> Out {
     Ok(json!({ "fetched": wanted.len(), "failed": failed }))
 }
 
+/// The trade list a rebalance would need. Its own route rather than part of /api/state because
+/// it takes a cash figure the user types, and recomputing every portfolio's trades on every poll
+/// of the dashboard would be work nobody asked for.
+fn trades(ctx: &Ctx, pid: &str, cash: f64) -> Out {
+    let s = store::load(&ctx.cfg).map_err(|e| Fail::new(500, e.to_string()))?;
+    let p = s
+        .portfolios
+        .iter()
+        .find(|p| p.id == pid)
+        .ok_or_else(|| Fail::new(404, "no such portfolio"))?;
+    let cache = ctx.cache.lock().expect("cache lock").clone();
+    let v = calc::view_portfolio(p, &s.base_currency, &cache);
+    match calc::trades(&v, cash) {
+        Ok(t) => Ok(json!({ "trades": t })),
+        // 409: the request is well formed, the portfolio is not ready for it. The page shows this
+        // message verbatim, so it must read as a sentence.
+        Err(e) => Err(Fail::new(409, e.to_string())),
+    }
+}
+
 fn search(ctx: &Ctx, query: &str) -> Out {
     if query.trim().is_empty() {
         return Ok(json!({ "hits": [] }));
@@ -391,6 +411,14 @@ fn handle(ctx: &Ctx, token: &str, req: Request) {
     let out: Out = match (req.method().as_str(), path.as_str()) {
         ("GET", "/api/state") => state(ctx),
         ("GET", "/api/search") => search(ctx, query.get("q").map(String::as_str).unwrap_or("")),
+        ("GET", "/api/trades") => trades(
+            ctx,
+            query.get("portfolio").map(String::as_str).unwrap_or(""),
+            query
+                .get("cash")
+                .and_then(|c| c.parse().ok())
+                .unwrap_or(0.0),
+        ),
         ("POST", "/api/refresh") => refresh(ctx),
         ("POST", "/api/portfolio") => body(&mut req).and_then(|b| create_portfolio(ctx, &b)),
         ("POST", "/api/holding") => body(&mut req).and_then(|b| put_holding(ctx, &b)),
@@ -524,22 +552,30 @@ mod tests {
 
     fn call(port: u16, method: &str, path: &str, token: &str, body: Value) -> (u16, Value) {
         let url = format!("http://127.0.0.1:{port}{path}");
+        // ureq turns a 4xx into an Error that carries the code and drops the body. A route whose
+        // contract IS the wording of its refusal cannot be tested that way, so this agent hands
+        // back every status as an ordinary response.
+        let agent: ureq::Agent = ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .build()
+            .into();
         let res = match method {
-            "POST" => ureq::post(&url)
+            "POST" => agent
+                .post(&url)
                 .header("X-Meridian-Token", token)
                 .send_json(body),
-            "PATCH" => ureq::patch(&url)
+            "PATCH" => agent
+                .patch(&url)
                 .header("X-Meridian-Token", token)
                 .send_json(body),
-            "DELETE" => ureq::delete(&url).header("X-Meridian-Token", token).call(),
-            _ => ureq::get(&url).header("X-Meridian-Token", token).call(),
+            "DELETE" => agent.delete(&url).header("X-Meridian-Token", token).call(),
+            _ => agent.get(&url).header("X-Meridian-Token", token).call(),
         };
         match res {
             Ok(mut r) => (
                 r.status().as_u16(),
                 r.body_mut().read_json().unwrap_or(Value::Null),
             ),
-            Err(ureq::Error::StatusCode(c)) => (c, Value::Null),
             Err(e) => panic!("request failed: {e}"),
         }
     }
@@ -794,5 +830,45 @@ mod tests {
         let t = new_token();
         assert_eq!(t.len(), 48, "24 random bytes as hex");
         assert_ne!(t, new_token(), "two calls must not agree");
+    }
+
+    #[test]
+    fn trades_are_refused_in_words_the_page_can_show_when_nothing_has_a_price() {
+        let (_d, port, t) = up();
+        let pid = with_portfolio(port, &t);
+        call(
+            port,
+            "POST",
+            "/api/holding",
+            &t,
+            json!({"portfolio_id": pid, "ticker": "EQNR.OL", "name": "E", "cls": "Equity",
+                   "shares": 1.0, "cost_basis": 1.0, "cost_currency": "NOK", "target_pct": 100.0}),
+        );
+        // No quote is cached in a fresh temp store, so this is the NothingPriced path.
+        let (code, v) = call(
+            port,
+            "GET",
+            &format!("/api/trades?portfolio={pid}&cash=0"),
+            &t,
+            Value::Null,
+        );
+        assert_eq!(code, 409);
+        assert!(
+            v["error"].as_str().expect("a message").contains("price"),
+            "got {v}"
+        );
+    }
+
+    #[test]
+    fn trades_refuse_a_portfolio_that_does_not_exist() {
+        let (_d, port, t) = up();
+        let (code, _) = call(
+            port,
+            "GET",
+            "/api/trades?portfolio=p_nope&cash=0",
+            &t,
+            Value::Null,
+        );
+        assert_eq!(code, 404);
     }
 }
