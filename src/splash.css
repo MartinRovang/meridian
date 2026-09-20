@@ -1,0 +1,84 @@
+@keyframes splash-in { from { opacity: 0; filter: blur(6px); } to { opacity: 1; filter: blur(0); } }
+@keyframes splash-shimmer { from { background-position: 100% 0; } to { background-position: -100% 0; } }
+
+.splash {
+  position: relative; height: 100vh; overflow: hidden;
+  display: grid; place-items: center; padding: 40px 28px;
+  background: radial-gradient(120% 90% at 50% 18%,
+    var(--color-neutral-900) 0%, var(--color-bg) 45%, #0e0f18 100%);
+  user-select: none;
+}
+
+/* ponytail: tooth, grain and vignette are three STATIC layers. gitdashy learned this the hard
+   way: animating them repaints the whole window every frame, and the software webview on Linux
+   stutters the shimmer to pieces. Leave them still. */
+.splash-tooth, .splash-grain, .splash-vignette { position: absolute; inset: 0; pointer-events: none; }
+.splash-tooth {
+  inset: -20%; opacity: 0.5; mix-blend-mode: soft-light;
+  background-image:
+    repeating-linear-gradient(38deg, rgba(233,233,237,0.055) 0 1px, transparent 1px 7px),
+    repeating-linear-gradient(-52deg, rgba(233,233,237,0.03) 0 1px, transparent 1px 11px);
+}
+.splash-grain {
+  opacity: 0.4; mix-blend-mode: overlay; background-size: 180px 180px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3'/%3E%3C/filter%3E%3Crect width='180' height='180' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+.splash-vignette { box-shadow: inset 0 0 180px 60px rgba(8,8,14,0.85); }
+
+.splash-card {
+  position: relative; width: 100%; max-width: 560px;
+  display: flex; flex-direction: column; align-items: center;
+  animation: splash-in 1.4s ease-out both;
+}
+/* The artwork keeps its colour: this logo's purple already is the brand, so there is no
+   greyscale filter here the way gitdashy has on its mark. */
+.splash-mark img { width: 148px; height: 148px; object-fit: contain; border-radius: 50%; }
+.splash h1 {
+  margin: min(30px, 3vh) 0 0; font-size: 56px; line-height: 1;
+  color: var(--color-text); text-shadow: 0 0 26px color-mix(in srgb, var(--color-accent) 30%, transparent);
+}
+.splash-rule {
+  width: 220px; height: 10px; margin-top: 10px; opacity: 0.6;
+  background: radial-gradient(60% 100% at 50% 0%, var(--color-accent-400), transparent 72%);
+}
+
+.splash-bar { width: 100%; margin-top: min(52px, 5vh); display: flex; flex-direction: column; gap: 10px; }
+.splash-track {
+  position: relative; height: 18px; border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--color-text) 7%, transparent);
+  box-shadow: inset 0 0 0 1px var(--color-divider);
+  overflow: hidden;
+}
+.splash-fill {
+  position: absolute; inset: 0 auto 0 0; width: 0;
+  background-image: repeating-linear-gradient(52deg,
+    var(--color-accent) 0 2.5px, var(--color-accent-700) 2.5px 6px);
+  box-shadow: 0 0 14px color-mix(in srgb, var(--color-accent) 35%, transparent);
+  transition: width 0.45s cubic-bezier(0.3, 0.8, 0.3, 1);
+}
+.splash-pct {
+  align-self: flex-end; font-size: 10px; letter-spacing: 0.2em;
+  color: var(--color-neutral-500); font-variant-numeric: tabular-nums;
+}
+
+/* The shimmer: a gradient clipped to the text, swept across it. It settles to a solid colour
+   on .ok rather than shimmering for ever, so a finished splash reads as finished. */
+.splash-steps {
+  margin: min(42px, 4vh) 0 0; font-size: 13px; letter-spacing: 0.02em;
+  color: transparent;
+  background-clip: text;
+  -webkit-background-clip: text;
+  background-size: 200% 100%;
+  background-image: linear-gradient(90deg,
+    var(--color-neutral-500) 35%, var(--color-accent-200) 50%, var(--color-neutral-500) 65%);
+  animation: splash-shimmer 1.6s linear infinite;
+}
+.splash-steps.ok { color: var(--color-text); background: none; animation: none; }
+
+.splash-err {
+  display: none; max-width: 420px; margin: min(42px, 4vh) 0 0;
+  font-size: 12px; line-height: 1.6; text-align: center; white-space: pre-wrap;
+  color: var(--color-accent-300);
+}
+.splash.failed .splash-err { display: block; }
+.splash.failed .splash-bar, .splash.failed .splash-steps { display: none; }
