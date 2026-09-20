@@ -151,7 +151,8 @@ pub const LISTINGS: &[Listing] = &[
     l("PNDORA.CO", "Pandora", COPENHAGEN),
     l("RBREW.CO", "Royal Unibrew", COPENHAGEN),
     l("ROCK-B.CO", "Rockwool B", COPENHAGEN),
-    l("SYDB.CO", "Sydbank", COPENHAGEN),
+    // Yahoo carries the Copenhagen line as ALSYDB.CO, not SYDB.CO, which returns Not Found.
+    l("ALSYDB.CO", "Sydbank", COPENHAGEN),
     l("TRYG.CO", "Tryg", COPENHAGEN),
     l("VWS.CO", "Vestas Wind Systems", COPENHAGEN),
     l("ZEAL.CO", "Zealand Pharma", COPENHAGEN),

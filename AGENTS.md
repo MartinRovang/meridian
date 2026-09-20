@@ -199,7 +199,13 @@ it, and the screen states which ran. Two performance rules keep the exhaustive
 case usable: the covariance over a subset is a submatrix of the covariance over
 all candidates, so it is computed once and sliced, and the solver's iteration
 cap is sized for the handful of assets in a basket. Rebuilding the covariance
-per combination took 124 seconds for 142,506 baskets; slicing it takes 8.
+per combination took 124 seconds for 142,506 baskets; slicing it takes 8 in a
+debug build and about 2 in a release one, which is what ships.
+
+The result must not depend on which thread finished first, so `par::best_of`
+breaks ties by the lower index. Two identical requests return the same basket to
+the last decimal, which is the difference between a search you can argue with
+and one you cannot.
 
 `crates/core/src/universe.rs` is the shipped list: Oslo's main board by
 turnover from a Euronext export, plus Stockholm and Copenhagen large caps by
