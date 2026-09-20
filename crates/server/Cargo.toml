@@ -1,0 +1,28 @@
+[package]
+name = "meridian-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "meridian_server"
+path = "src/lib.rs"
+
+[[bin]]
+name = "meridian-server"
+path = "src/main.rs"
+
+[dependencies]
+meridian-core = { path = "../core" }
+anyhow.workspace = true
+clap.workspace = true
+getrandom.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tiny_http.workspace = true
+urlencoding.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+ureq.workspace = true
