@@ -96,6 +96,90 @@ pub fn save(cfg: &Config, c: &Cache) -> std::io::Result<()> {
     std::fs::rename(tmp, cfg.quotes_path())
 }
 
+/// One row from a ticker search, already narrowed to the configured scope.
+#[derive(Clone, Debug, serde::Serialize, PartialEq)]
+pub struct SearchHit {
+    pub symbol: String,
+    pub name: String,
+    pub exchange: String,
+    /// Yahoo's search does not return a currency; it is filled in when the quote is first fetched.
+    pub currency: String,
+}
+
+/// The Yahoo symbol for a currency pair, or None when no conversion is needed.
+///
+/// ponytail: one hop, base currency only. A cross rate through a third currency is not
+/// attempted; Yahoo quotes every pair we care about directly.
+pub fn fx_symbol(from: &str, to: &str) -> Option<String> {
+    let (from, to) = (from.to_ascii_uppercase(), to.to_ascii_uppercase());
+    if from == to {
+        return None;
+    }
+    Some(format!("{from}{to}=X"))
+}
+
+/// Search hits for a query, keeping only the exchanges this scope admits and only instruments
+/// you can hold a share of. Order is Yahoo's own relevance order, which for a Nordic name puts
+/// the US listing first, so the scope filter is what makes this usable rather than a nicety.
+pub fn parse_search(body: &str, scope: crate::config::Scope) -> Vec<SearchHit> {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(body) else {
+        return Vec::new();
+    };
+    let Some(rows) = v.get("quotes").and_then(|q| q.as_array()) else {
+        return Vec::new();
+    };
+    rows.iter()
+        .filter_map(|r| {
+            let symbol = r.get("symbol")?.as_str()?.to_string();
+            if !scope.accepts(&symbol) {
+                return None;
+            }
+            // ponytail: currencies, indices, crypto and futures are not things you can hold a
+            // share of. Yahoo returns them freely; a portfolio of them would break every weight.
+            let kind = r.get("quoteType").and_then(|k| k.as_str()).unwrap_or("");
+            if !matches!(kind, "EQUITY" | "ETF" | "MUTUALFUND") {
+                return None;
+            }
+            Some(SearchHit {
+                symbol,
+                // longname before shortname: Oslo's shortname for EQNR.OL is the bare exchange
+                // label "EQUINOR", while longname is "Equinor ASA". The long one is what a
+                // person scanning a result list actually recognises.
+                name: r
+                    .get("longname")
+                    .or_else(|| r.get("shortname"))
+                    .and_then(|n| n.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                exchange: r
+                    .get("exchange")
+                    .and_then(|e| e.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                currency: String::new(),
+            })
+        })
+        .collect()
+}
+
+/// Run a search against Yahoo. An empty vector on any failure.
+pub fn search(query: &str, scope: crate::config::Scope) -> Vec<SearchHit> {
+    let url = format!(
+        "https://query1.finance.yahoo.com/v1/finance/search?q={}&quotesCount=20&newsCount=0",
+        urlencoding::encode(query)
+    );
+    ureq::get(&url)
+        .header("User-Agent", AGENT)
+        .config()
+        .timeout_global(Some(TIMEOUT))
+        .build()
+        .call()
+        .ok()
+        .and_then(|mut r| r.body_mut().read_to_string().ok())
+        .map(|b| parse_search(&b, scope))
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -157,6 +241,79 @@ mod tests {
         let back = load(&cfg);
         assert_eq!(back.get("EQNR.OL").map(|q| q.price), Some(419.0));
         assert!(!back.contains_key("NOPE.OL"));
+    }
+
+    const SEARCH: &str = include_str!("../tests/fixtures/search_equinor.json");
+
+    fn symbols(scope: Scope) -> Vec<String> {
+        parse_search(SEARCH, scope)
+            .into_iter()
+            .map(|h| h.symbol)
+            .collect()
+    }
+
+    #[test]
+    fn search_in_a_narrow_scope_drops_the_foreign_listings() {
+        // The fixture is real: Yahoo ranks the NYSE listing ABOVE the Oslo one, and throws in
+        // OTC pink sheets, Frankfurt and Dusseldorf. This filter is why search is usable.
+        assert_eq!(symbols(Scope::Norway), vec!["EQNR.OL"]);
+    }
+
+    #[test]
+    fn a_wider_scope_keeps_stockholm_and_copenhagen_too() {
+        assert_eq!(
+            symbols(Scope::Scandinavia),
+            vec!["EQNR.OL", "VOLCAR-B.ST", "VOLV-B.ST", "NOVO-B.CO"]
+        );
+    }
+
+    #[test]
+    fn europe_reaches_german_listings_that_scandinavia_does_not() {
+        let eu = symbols(Scope::Europe);
+        assert!(eu.contains(&"NOV.DE".to_string()));
+        assert!(eu.contains(&"EQNR.OL".to_string()));
+        assert!(!symbols(Scope::Scandinavia).contains(&"NOV.DE".to_string()));
+    }
+
+    #[test]
+    fn global_scope_keeps_everything_tradeable_in_the_order_yahoo_gave() {
+        let all = symbols(Scope::Global);
+        assert_eq!(all[0], "EQNR", "yahoo's own ranking is preserved");
+        assert_eq!(all[1], "EQNR.OL");
+        assert!(
+            all.contains(&"STOHF".to_string()),
+            "otc listings are still holdable"
+        );
+    }
+
+    #[test]
+    fn things_you_cannot_hold_a_share_of_are_dropped_even_in_global_scope() {
+        // The fixture carries NVOX-USD, a CRYPTOCURRENCY row Yahoo returns for "novo nordisk".
+        assert!(!symbols(Scope::Global).contains(&"NVOX-USD".to_string()));
+    }
+
+    #[test]
+    fn a_search_hit_carries_the_name_users_recognise() {
+        let hits = parse_search(SEARCH, Scope::Norway);
+        assert_eq!(hits[0].name, "Equinor ASA");
+        assert_eq!(hits[0].exchange, "OSL");
+    }
+
+    #[test]
+    fn a_search_over_garbage_is_empty_rather_than_a_panic() {
+        assert!(parse_search("", Scope::Global).is_empty());
+        assert!(parse_search("{}", Scope::Global).is_empty());
+    }
+
+    #[test]
+    fn fx_is_a_yahoo_pair_symbol_and_the_same_currency_needs_none() {
+        assert_eq!(fx_symbol("USD", "NOK"), Some("USDNOK=X".to_string()));
+        assert_eq!(fx_symbol("SEK", "NOK"), Some("SEKNOK=X".to_string()));
+        assert_eq!(
+            fx_symbol("nok", "NOK"),
+            None,
+            "same currency needs no conversion"
+        );
     }
 
     #[test]
