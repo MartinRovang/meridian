@@ -5,6 +5,7 @@
 
 pub mod calc;
 pub mod config;
+pub mod import;
 pub mod quotes;
 pub mod store;
 pub mod types;
