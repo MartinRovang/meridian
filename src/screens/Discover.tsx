@@ -317,10 +317,17 @@ function Outlook({ out }: { out: Result }) {
       <div className="panel-head">What this implies about the next {months} months</div>
       <div className="stat-row">
         <Stat label="Central estimate" value={`${signed(f.expected_pct)}%`} />
+        {/* Each end carries its own colour. Painting the whole interval red because it starts
+            below zero says "this is bad" about a range that is mostly above zero. */}
         <Stat
           label="95% interval"
-          value={`${signed(f.low_pct)}% to ${signed(f.high_pct)}%`}
-          tone={f.low_pct < 0 ? 'down' : undefined}
+          value={
+            <>
+              <span className={f.low_pct < 0 ? 'down' : 'up'}>{signed(f.low_pct)}%</span>
+              <span className="text-muted"> to </span>
+              <span className={f.high_pct < 0 ? 'down' : 'up'}>{signed(f.high_pct)}%</span>
+            </>
+          }
         />
         <Stat
           label="Last time, predicted"

@@ -90,3 +90,14 @@ export function rsi(points: Point[], span = 14): (number | null)[] {
   }
   return out
 }
+
+/// Move the series so its first day reads 100 again.
+///
+/// Slicing a range off the front leaves the chart's one gridline pointing at a day that is no
+/// longer on it. Rebasing makes 100 mean "where this range started", which is the only reading
+/// that matches the label on the axis.
+export function rebase(points: Point[]): Point[] {
+  const first = points[0]?.index
+  if (!first) return points
+  return points.map((p) => ({ day: p.day, index: (p.index / first) * 100 }))
+}

@@ -2,7 +2,6 @@ import { useEffect } from 'react'
 import { apiBase, post } from './api'
 import { Sidebar } from './Sidebar'
 import { Splash } from './Splash'
-import { Analytics } from './screens/Analytics'
 import { Builder } from './screens/Builder'
 import { Dashboard } from './screens/Dashboard'
 import { Rebalance } from './screens/Rebalance'
@@ -15,7 +14,6 @@ import { useApp } from './store'
 
 const TITLES: Record<string, [string, string]> = {
   dashboard: ['Overview', 'Portfolio overview'],
-  analytics: ['Examine', 'Analytics'],
   builder: ['Construct', 'Portfolio builder'],
   rebalance: ['Act', 'Rebalance proposal'],
   stress: ['Examine', 'Stress test'],
@@ -71,10 +69,10 @@ export function App() {
             </button>
           </div>
         ) : null}
-        {screen === 'dashboard' ? (
+        {/* The chart moved onto the Dashboard, so an old #analytics link lands there rather
+            than on a screen that no longer exists. */}
+        {screen === 'dashboard' || screen === 'analytics' ? (
           <Dashboard />
-        ) : screen === 'analytics' ? (
-          <Analytics />
         ) : screen === 'builder' ? (
           <Builder />
         ) : screen === 'rebalance' ? (

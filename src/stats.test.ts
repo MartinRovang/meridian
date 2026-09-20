@@ -1,5 +1,5 @@
 import { expect, test } from 'vitest'
-import { annualised, bollinger, drawdown, rsi, volatility, type Point } from './stats'
+import { annualised, bollinger, drawdown, rebase, rsi, volatility, type Point } from './stats'
 
 const series = (values: number[]): Point[] =>
   values.map((index, i) => ({ day: `2026-01-${String(i + 1).padStart(2, '0')}`, index }))
@@ -98,4 +98,20 @@ test('rsi smooths the way Wilder did, not as a plain rolling mean', () => {
   const avgGain = (14 / 14) * (13 / 14)
   const avgLoss = 1 / 14
   expect(r[15]).toBeCloseTo(100 - 100 / (1 + avgGain / avgLoss), 6)
+})
+
+test('rebasing puts 100 at the first day of the range and leaves the shape alone', () => {
+  const r = rebase(series([120, 132, 108]))
+  expect(r[0].index).toBe(100)
+  expect(r[1].index).toBeCloseTo(110, 9)
+  expect(r[2].index).toBeCloseTo(90, 9)
+  // The ratio between any two days is what the chart is drawing, and it must survive the move.
+  expect(r[2].index / r[1].index).toBeCloseTo(108 / 132, 9)
+})
+
+test('rebasing an empty or zero-based series does not produce infinities', () => {
+  expect(rebase([])).toEqual([])
+  // A zero first day cannot be divided by. Leaving the series alone is wrong in principle and
+  // harmless in practice: an index of zero means the money was all gone on day one.
+  expect(rebase(series([0, 5]))[1].index).toBe(5)
 })

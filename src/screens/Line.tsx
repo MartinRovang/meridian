@@ -21,15 +21,19 @@ export function Line({
   compare,
   bands,
   ma,
+  span: window = SPAN,
+  k = K,
 }: {
   points: Point[]
   compare?: Point[]
   bands?: boolean
   ma?: boolean
+  span?: number
+  k?: number
 }) {
   if (points.length < 2) return null
   const values = points.map((p) => p.index)
-  const band = bands || ma ? bollinger(points, SPAN, K) : []
+  const band = bands || ma ? bollinger(points, window, k) : []
   // The second line shares the axis, so it has to share the scale: drawing it on its own range
   // would put two different scales on one picture and make the loser look like the winner. The
   // envelope joins the same reckoning, or a band wider than the price would be clipped off.
@@ -89,8 +93,8 @@ export function Line({
 ///
 /// It gets its own picture rather than a second axis on the first: two scales in one frame is the
 /// chart mistake that makes a flat line look like a rally.
-export function Rsi({ points }: { points: Point[] }) {
-  const r = rsi(points, RSI_SPAN)
+export function Rsi({ points, span = RSI_SPAN }: { points: Point[]; span?: number }) {
+  const r = rsi(points, span)
   const drawn = r.map((v, i) => ({ v, i })).filter((p) => p.v !== null)
   if (drawn.length < 2) return null
   const h = 72

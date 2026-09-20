@@ -75,14 +75,19 @@ The preview route takes raw bytes rather than JSON: these exports are commonly
 UTF-16, and a JSON string would destroy the encoding the parser exists to cope
 with.
 
-## Price history and Analytics
+## Price history and the performance panel
 
 `crates/core/src/history.rs` stores one JSON file per symbol under
 `<store>/history/`. Adjusted close, not close: an unadjusted series reports
 every dividend as a loss on the ex-date.
 
+There is no Analytics screen: the chart lives on the Dashboard as
+`screens/Performance.tsx`, which fetches its own history so the figures at the
+top of the screen do not wait for a walk over every day of every holding. The
+old `#analytics` hash still lands on the Dashboard.
+
 `calc::allocation_history` is **not** the portfolio's past performance, and the
-screen says so out loud. Meridian stores no transactions, so it cannot know
+panel says so out loud. Meridian stores no transactions, so it cannot know
 what was held last year; every point values today's share count at that day's
 prices. Anything that presents it as realised performance is a lie about
 someone's money.
@@ -111,8 +116,8 @@ decimals that is mostly noise, and it would obscure the honest part of the
 screen, which is that the user chose the shock.
 
 *Worst it has been* reports the worst move across any window of 1, 5, 21 and 63
-trading days in the same series Analytics draws, with the days it ran between.
-It carries Analytics' caveat, because it is the same series: today's holdings
+trading days in the same series the Dashboard draws, with the days it ran
+between. It carries that caveat, because it is the same series: today's holdings
 priced back through time, not a record of what the portfolio held.
 
 `src/stress.ts` computes money in TypeScript, which "All money math lives in
@@ -123,13 +128,14 @@ unpriced holding is named rather than shocked as though it were worth nothing.
 
 ## The Backtest screen
 
-The same series Analytics draws, against a benchmark over the same days.
+The same series the Dashboard draws, against a benchmark over the same days.
 
 A benchmark is one share of one symbol, so it goes through
 `calc::allocation_history` exactly as the portfolio does: the same forward
 fill, the same conversion into base currency, the same refusal to value what it
 has no rate for. `GET /api/history?portfolio=X&benchmark=SYM` returns both, and
-without `benchmark` the response is unchanged, which is what Analytics reads.
+without `benchmark` the response is unchanged, which is what the Dashboard
+reads.
 
 `calc::align` cuts the two to the days they share and rebases both to 100 on
 the first of them. A benchmark whose history starts later would otherwise be
@@ -296,8 +302,18 @@ already computes, so every rule is testable without a network or a clock. Only
 ## Indicators on the charts
 
 `src/stats.ts` computes them, `Line` draws them, `useIndicators` holds the three
-switches so Analytics and Backtest cannot drift apart. Nothing reaches the
+switches so the Dashboard and Backtest cannot drift apart. Nothing reaches the
 server: the indexed series is already on the client.
+
+**The windows are the reader's, not the library's.** 20 days and 2 deviations,
+and Wilder's 14, are where the controls start, not where they stay. `Line` and
+`Rsi` take the window as props and fall back to those constants, so a screen
+that does not care still gets the conventional picture.
+
+`useRange` cuts the series to the last N trading days, and `rebase` puts 100 at
+the first day of whatever is left. Without the rebase the chart's one gridline
+would point at a day no longer on it. In Backtest both lines are cut and
+rebased together, or the comparison would give one of them a head start.
 
 `bollinger` uses the **population** deviation over its own window, while
 `volatility` above it uses the **sample** one. That is deliberate. A Bollinger

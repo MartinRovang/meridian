@@ -5,8 +5,8 @@ import { SkelScreen } from '../Skeleton'
 import { Stat } from '../Stat'
 import { TickerSearch } from '../TickerSearch'
 import { useApp } from '../store'
-import { annualised, drawdown, volatility } from '../stats'
-import { useIndicators } from '../Indicators'
+import { annualised, drawdown, rebase, volatility } from '../stats'
+import { useIndicators, useRange } from '../Indicators'
 import { Line, Rsi, type Point } from './Line'
 
 type Bench = { symbol: string; points: Point[] }
@@ -71,8 +71,14 @@ export function Backtest() {
 }
 
 function Result({ hist }: { hist: History }) {
-  const { points, missing, benchmark } = hist
+  const { missing, benchmark } = hist
   const [shown, switches] = useIndicators()
+  const [days, rangeUi] = useRange()
+  // Both lines are cut and rebased together, or the comparison would start them on different
+  // days and give one of them a head start.
+  const cut = (ps: Point[]) => rebase(days ? ps.slice(-days) : ps)
+  const points = cut(hist.points)
+  const bench = benchmark ? { ...benchmark, points: cut(benchmark.points) } : undefined
   if (points.length < 2) {
     return (
       <p className="text-muted">
@@ -86,9 +92,9 @@ function Result({ hist }: { hist: History }) {
   }
 
   const mine = last(points)
-  const theirs = benchmark ? last(benchmark.points) : 0
+  const theirs = bench ? last(bench.points) : 0
   const ann = annualised(points)
-  const annB = benchmark ? annualised(benchmark.points) : null
+  const annB = bench ? annualised(bench.points) : null
 
   return (
     <>
@@ -102,9 +108,17 @@ function Result({ hist }: { hist: History }) {
         <div className="panel-head">
           Indexed to 100 on {points[0].day}
         </div>
+        {rangeUi}
         {switches}
-        <Line points={points} compare={benchmark?.points} bands={shown.bands} ma={shown.ma} />
-        {shown.rsi ? <Rsi points={points} /> : null}
+        <Line
+          points={points}
+          compare={bench?.points}
+          bands={shown.bands}
+          ma={shown.ma}
+          span={shown.span}
+          k={shown.k}
+        />
+        {shown.rsi ? <Rsi points={points} span={shown.rsiSpan} /> : null}
         <div className="legend-line">
           <span className={mine >= 0 ? 'up' : 'down'}>
             <i /> This portfolio
@@ -135,11 +149,11 @@ function Result({ hist }: { hist: History }) {
 
       <div className="stat-row">
         <Stat label="Volatility" value={pct(volatility(points))} />
-        <Stat label="Volatility, benchmark" value={benchmark ? pct(volatility(benchmark.points)) : '--'} />
+        <Stat label="Volatility, benchmark" value={bench ? pct(volatility(bench.points)) : '--'} />
         <Stat label="Worst drawdown" value={`-${pct(drawdown(points))}`} />
         <Stat
           label="Worst drawdown, benchmark"
-          value={benchmark ? `-${pct(drawdown(benchmark.points))}` : '--'}
+          value={bench ? `-${pct(drawdown(bench.points))}` : '--'}
         />
       </div>
 
