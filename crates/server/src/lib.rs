@@ -18,7 +18,7 @@ use tiny_http::{Header, Method, Request, Response, Server};
 
 use meridian_core::config::Config;
 use meridian_core::{
-    alerts, calc, discover, history, import, optimize, quotes, rules, store, universe,
+    alerts, calc, discover, energy, history, import, optimize, quotes, rules, store, universe,
 };
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -453,6 +453,45 @@ fn histories_for(
     pairs.dedup();
     let fx = fetch_into(&pairs);
     (loaded, fx)
+}
+
+/// What the portfolio is a bet on: every holding and every Nordic energy and shipping listing,
+/// measured against one driver over one window.
+///
+/// The returns are built in each symbol's own currency, not in base: converting a Norwegian
+/// share and a dollar oil future into kroner puts USDNOK on both sides and inflates the
+/// correlation with it.
+fn energy_route(ctx: &Ctx, pid: &str, q: &HashMap<String, String>) -> Out {
+    let s = load(ctx)?;
+    let driver = q.get("driver").map(String::as_str).unwrap_or("BZ=F");
+    if energy::driver_of(driver).is_none() {
+        return Err(Fail::new(400, "no such driver"));
+    }
+    let years: f64 = q.get("years").and_then(|x| x.parse().ok()).unwrap_or(3.0);
+    if !(1.0..=10.0).contains(&years) {
+        return Err(Fail::new(400, "years must be between 1 and 10"));
+    }
+
+    let owned: Vec<String> = s
+        .portfolios
+        .iter()
+        .find(|p| p.id == pid)
+        .map(|p| p.holdings.iter().map(|h| h.ticker.clone()).collect())
+        .unwrap_or_default();
+    let mut wanted: Vec<String> = energy::LISTINGS
+        .iter()
+        .map(|(t, _, _)| t.to_string())
+        .collect();
+    wanted.extend(owned.iter().cloned());
+    wanted.push(driver.to_string());
+    wanted.sort();
+    wanted.dedup();
+
+    let (loaded, _) = histories_for(ctx, &wanted, &s.base_currency);
+    let since = history::day(chrono::Utc::now().timestamp() - (years * 365.25 * 86_400.0) as i64);
+    let (m, unusable) = optimize::build_local(&wanted, &loaded, &since);
+    let out = energy::analyse(&m, driver, &owned, unusable);
+    serde_json::to_value(&out).map_err(|e| Fail::new(500, e.to_string()))
 }
 
 /// Weights the covariance argues for, over the holdings there is history to measure.
@@ -1032,6 +1071,16 @@ fn handle(ctx: &Ctx, token: &str, req: Request) {
         ("GET", "/api/rules/hits") => rule_hits(ctx),
         ("GET", "/api/markets") => Ok(json!({ "markets": universe::SCOPES })),
         ("GET", "/api/discover") => discover_route(ctx, &query),
+        ("GET", "/api/drivers") => Ok(json!({
+            "drivers": energy::DRIVERS.iter().map(|d| json!({
+                "symbol": d.symbol, "name": d.name, "kind": d.kind
+            })).collect::<Vec<_>>()
+        })),
+        ("GET", "/api/energy") => energy_route(
+            ctx,
+            query.get("portfolio").map(String::as_str).unwrap_or(""),
+            &query,
+        ),
         ("GET", "/api/optimize") => optimize_route(
             ctx,
             query.get("portfolio").map(String::as_str).unwrap_or(""),
@@ -1376,6 +1425,34 @@ mod tests {
             err["error"].as_str().expect("error").contains("60"),
             "the message should say what they did sum to: {err}"
         );
+    }
+
+    #[test]
+    fn the_drivers_are_listed_and_a_bad_one_is_refused_before_anything_is_fetched() {
+        // Validation happens before `histories_for`, which is what keeps this test off the
+        // network: no test in this repo may touch Yahoo.
+        let (_d, port, t) = up();
+        let (code, got) = call(port, "GET", "/api/drivers", &t, Value::Null);
+        assert_eq!(code, 200);
+        let names: Vec<&str> = got["drivers"]
+            .as_array()
+            .expect("array")
+            .iter()
+            .map(|d| d["symbol"].as_str().unwrap_or(""))
+            .collect();
+        assert!(names.contains(&"BZ=F"), "{got}");
+        assert!(names.contains(&"BWET"), "tanker freight: {got}");
+
+        let (bad, _) = call(port, "GET", "/api/energy?driver=NOPE=F", &t, Value::Null);
+        assert_eq!(bad, 400, "an unknown driver is refused");
+        let (years, _) = call(
+            port,
+            "GET",
+            "/api/energy?driver=BZ=F&years=40",
+            &t,
+            Value::Null,
+        );
+        assert_eq!(years, 400, "and so is a window nobody has data for");
     }
 
     #[test]

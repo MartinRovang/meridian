@@ -7,6 +7,7 @@ pub mod alerts;
 pub mod calc;
 pub mod config;
 pub mod discover;
+pub mod energy;
 pub mod history;
 pub mod import;
 pub mod optimize;

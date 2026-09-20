@@ -78,6 +78,18 @@ fn in_base(
     base: &str,
     fx: &HashMap<String, Series>,
 ) -> Option<BTreeMap<String, f64>> {
+    // An empty base means "leave it in its own currency". A sensitivity to the oil price is
+    // measured between two local price series: converting both into kroner puts USDNOK on both
+    // sides of the comparison and inflates every correlation with it.
+    if base.is_empty() {
+        return Some(
+            series
+                .bars
+                .iter()
+                .map(|b| (b.day.clone(), b.close))
+                .collect(),
+        );
+    }
     let rates: Option<BTreeMap<String, f64>> = match fx_symbol(&series.currency, base) {
         None => None,
         Some(pair) => Some(
@@ -114,6 +126,15 @@ pub fn build(
     fx: &HashMap<String, Series>,
 ) -> (Matrix, Vec<String>) {
     build_since(want, base, histories, fx, "")
+}
+
+/// Daily returns in each symbol's own currency, restricted to days on or after `since`.
+pub fn build_local(
+    want: &[String],
+    histories: &HashMap<String, Series>,
+    since: &str,
+) -> (Matrix, Vec<String>) {
+    build_since(want, "", histories, &HashMap::new(), since)
 }
 
 /// The same, restricted to days on or after `since`.

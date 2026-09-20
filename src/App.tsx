@@ -11,6 +11,7 @@ import { Optimize } from './screens/Optimize'
 import { Discover } from './screens/Discover'
 import { Alerts } from './screens/Alerts'
 import { Rules } from './screens/Rules'
+import { Energy } from './screens/Energy'
 import { useApp } from './store'
 
 const TITLES: Record<string, [string, string]> = {
@@ -23,6 +24,7 @@ const TITLES: Record<string, [string, string]> = {
   discover: ['Examine', 'Discover'],
   alerts: ['Act', 'Alerts'],
   rules: ['Act', 'Rules'],
+  energy: ['Examine', 'Energy & shipping'],
 }
 
 export function App() {
@@ -91,6 +93,8 @@ export function App() {
           <Alerts />
         ) : screen === 'rules' ? (
           <Rules />
+        ) : screen === 'energy' ? (
+          <Energy />
         ) : (
           <p className="text-muted">{title} is not built yet.</p>
         )}

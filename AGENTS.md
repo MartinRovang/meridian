@@ -330,6 +330,34 @@ RSI gets its own picture under the chart rather than a second axis on it. Two
 scales in one frame is the chart mistake that makes a flat line look like a
 rally.
 
+## Energy & shipping
+
+`crates/core/src/energy.rs`. One driver, one window, one slope per listing.
+`analyse` regresses each symbol's daily returns on the driver's: beta is the
+covariance over the driver's own variance, and the correlation travels beside
+it because a beta of 1.4 with a correlation of 0.1 is a line fitted through
+noise, not an exposure.
+
+**The returns are built in local currency, not in base.** `optimize::build_local`
+passes an empty base through `in_base`, which then leaves each series in its own
+currency. Converting a Norwegian share and a dollar oil future into kroner puts
+USDNOK on both sides of the comparison and inflates every correlation with it.
+
+**No freight index.** The Baltic Exchange's indices are licensed and are not in
+this app. `BDRY` and `BWET` are funds holding freight futures, which is the
+closest keyless substitute, and the screen says what they are: a fund carries
+its own costs and rolls its contracts.
+
+**`LISTINGS` is hand-kept, like `universe`.** Seven tickers in the first draft
+were dead: Seadrill, Flex LNG and others had left Oslo or been absorbed, and
+Golden Ocean's exposure now lives in CMB.TECH. The screen names what it could
+not measure rather than dropping it silently, which is how they were found.
+Expect to fix one every year or so.
+
+A divider by zero is guarded twice: a driver that never moved gives a beta of
+zero, meaning "nothing measured", rather than an infinity that would be
+rendered on screen.
+
 ## Rules
 
 `crates/core/src/rules.rs`. A rule is one field, one comparison and one number,
