@@ -1,0 +1,150 @@
+{
+ "quotes": [
+  {
+   "symbol": "EQNR",
+   "shortname": "Equinor ASA",
+   "longname": "Equinor ASA",
+   "exchange": "NYQ",
+   "quoteType": "EQUITY"
+  },
+  {
+   "symbol": "EQNR.OL",
+   "shortname": "EQUINOR",
+   "longname": "Equinor ASA",
+   "exchange": "OSL",
+   "quoteType": "EQUITY"
+  },
+  {
+   "symbol": "DNQ.F",
+   "shortname": "Equinor ASA                   N",
+   "longname": "Equinor ASA",
+   "exchange": "FRA",
+   "quoteType": "EQUITY"
+  },
+  {
+   "symbol": "STOHF",
+   "shortname": "Equinor ASA",
+   "longname": "Equinor ASA",
+   "exchange": "PNK",
+   "quoteType": "EQUITY"
+  },
+  {
+   "symbol": "DNQA.DU",
+   "shortname": "Equinor ASA                   N",
+   "longname": "Equinor ASA",
+   "exchange": "DUS",
+   "quoteType": "EQUITY"
+  },
+  {
+   "symbol": "0P0001886Z.IR",
+   "shortname": "0P0001886Z.IR",
+   "longname": "Equinor Aksjer Pacific Indeks",
+   "exchange": "ISE",
+   "quoteType": "MUTUALFUND"
+  },
+  {
+   "symbol": "DNQ.DU",
+   "shortname": "Equinor ASA                   N",
+   "longname": "Equinor ASA",
+   "exchange": "DUS",
+   "quoteType": "EQUITY"
+  },
+  {
+   "symbol": "VOLCAR-B.ST",
+   "shortname": "Volvo Car AB ser. B",
+   "longname": "Volvo Car AB (publ.)",
+   "exchange": "STO",
+   "quoteType": "EQUITY"
+  },
+  {
+   "symbol": "VOLV-B.ST",
+   "shortname": "Volvo, AB ser. B",
+   "longname": "AB Volvo (publ)",
+   "exchange": "STO",
+   "quoteType": "EQUITY"
+  },
+  {
+   "symbol": "VLVLY",
+   "shortname": "Volvo AB",
+   "longname": "AB Volvo (publ)",
+   "exchange": "PNK",
+   "quoteType": "EQUITY"
+  },
+  {
+   "symbol": "VOL3.DU",
+   "shortname": "Volvo (publ), AB              N",
+   "longname": "Volvo AB",
+   "exchange": "DUS",
+   "quoteType": "EQUITY"
+  },
+  {
+   "symbol": "VLVOF",
+   "shortname": "VOLVO CAR AB",
+   "longname": "Volvo Car AB (publ.)",
+   "exchange": "PNK",
+   "quoteType": "EQUITY"
+  },
+  {
+   "symbol": "0AAK.IL",
+   "shortname": "VOLVO CAR AB VOLVO CAR ORD SHS ",
+   "longname": "Volvo Car AB (publ.)",
+   "exchange": "IOB",
+   "quoteType": "EQUITY"
+  },
+  {
+   "symbol": "VLVCY",
+   "shortname": "VOLVO CAR AB",
+   "longname": "Volvo Car AB (publ.)",
+   "exchange": "PNK",
+   "quoteType": "EQUITY"
+  },
+  {
+   "symbol": "NVO",
+   "shortname": "Novo Nordisk A/S",
+   "longname": "Novo Nordisk A/S",
+   "exchange": "NYQ",
+   "quoteType": "EQUITY"
+  },
+  {
+   "symbol": "NOVO-B.CO",
+   "shortname": "Novo Nordisk B A/S",
+   "longname": "Novo Nordisk A/S",
+   "exchange": "CPH",
+   "quoteType": "EQUITY"
+  },
+  {
+   "symbol": "NOV.DE",
+   "shortname": "Novo-Nordisk AS               N",
+   "longname": "Novo Nordisk A/S",
+   "exchange": "GER",
+   "quoteType": "EQUITY"
+  },
+  {
+   "symbol": "NVOX-USD",
+   "shortname": "Novo Nordisk tokenized stock (xStock) USD",
+   "longname": "Novo Nordisk tokenized stock (xStock) USD",
+   "exchange": "CCC",
+   "quoteType": "CRYPTOCURRENCY"
+  },
+  {
+   "symbol": "NONOF",
+   "shortname": "Novo-Nordisk A/S",
+   "longname": "Novo Nordisk A/S",
+   "exchange": "PNK",
+   "quoteType": "EQUITY"
+  },
+  {
+   "symbol": "NVON.NE",
+   "shortname": "NOVO NORDISK CDR (CAD HEDGED)",
+   "longname": "Novo Nordisk A/S",
+   "exchange": "NEO",
+   "quoteType": "EQUITY"
+  },
+  {
+   "symbol": "NOVOBC.XD",
+   "shortname": "Novo Nordisk A/S",
+   "exchange": "DXE",
+   "quoteType": "EQUITY"
+  }
+ ]
+}
