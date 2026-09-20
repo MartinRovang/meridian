@@ -2193,9 +2193,12 @@ dependencies = [
  "clap",
  "meridian-core",
  "meridian-server",
+ "regex",
+ "sha2",
  "tauri",
  "tauri-build",
  "tauri-plugin-single-instance",
+ "ureq",
  "urlencoding",
 ]
 

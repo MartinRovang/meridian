@@ -1,0 +1,165 @@
+name: CI
+on:
+  pull_request:
+  push:
+    branches: [main]
+  # ponytail: an RC off any branch. The tag gets an -rcN suffix, which the regex in
+  # update::newest_tag (anchored at \d+$) never matches, so no installed app is offered it.
+  # Testers take it by name: REF=v0.2.0-rc7 sh install.sh
+  # The button needs this trigger on the DEFAULT branch; the run then uses the chosen branch's copy.
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  # ponytail: only the desktop crate needs a webview. The server deliberately needs none, which is
+  # what the server-isolation job exists to prove.
+  APT_DEPS: libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev libdbus-1-dev
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y $APT_DEPS
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - run: pnpm lint
+      - run: pnpm test
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test --workspace
+
+  # ponytail: the crate split is the architecture, so it gets a job. No apt packages, no webkit, no
+  # gtk, no UI bundle. If meridian-server has picked up a desktop dependency, this is where it shows
+  # up, and it is meant to fail loudly.
+  server-isolation:
+    runs-on: ubuntu-latest
+    container: rust:1-slim
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo build -p meridian-server --release
+
+  version-bumped:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: git fetch origin "$GITHUB_BASE_REF" --depth=1
+      - name: version in Cargo.toml must differ from base branch
+        run: |
+          # a PR that ADDS Cargo.toml has no base version: git show fatals, and under `set -e` that
+          # kills the step before the comparison. No base is not the same as no bump.
+          base=$(git show "origin/$GITHUB_BASE_REF:Cargo.toml" 2>/dev/null | grep -m1 '^version = ' || true)
+          head=$(grep -m1 '^version = ' Cargo.toml)
+          echo "base: $base"; echo "head: $head"
+          [ "$base" != "$head" ] || { echo "::error::Bump version in Cargo.toml before merging"; exit 1; }
+
+  release:
+    if: github.event_name != 'pull_request'
+    needs: [test, server-isolation]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: tag
+        name: Release v$VERSION (a manual run is an -rc prerelease) unless the tag already exists
+        run: |
+          tag=v$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          pre=
+          # a manual run never claims the plain version: it is an RC off whatever branch was picked.
+          # --prerelease keeps it out of releases/latest, which install.sh defaults to.
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+            tag="$tag-rc$GITHUB_RUN_NUMBER"
+            pre="--prerelease --target $GITHUB_SHA"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          gh release view "$tag" >/dev/null 2>&1 && { echo "$tag already released"; exit 0; }
+          # ponytail: a draft until the binaries are on it. A published release with no asset is what
+          # the in-app updater and install.sh download from, and they 404 for the whole build.
+          gh release create "$tag" --draft --generate-notes $pre
+
+  # ponytail: two binaries per release, named the way update::asset_name() and install.sh look for
+  # them. The app carries the Vite bundle; the server carries nothing but itself.
+  binaries:
+    if: github.event_name != 'pull_request'
+    needs: release
+    strategy:
+      matrix:
+        include:
+          # ponytail: 22.04, not latest. The binary's glibc floor is whatever it was BUILT against, so
+          # a 24.04 runner silently makes it unrunnable on 22.04 and Debian 12.
+          - os: ubuntu-22.04
+            crate: meridian
+            asset: meridian-linux-x86_64
+            desktop: true
+          - os: ubuntu-22.04
+            crate: meridian-server
+            asset: meridian-server-linux-x86_64
+            desktop: false
+          # ponytail: Linux only for now. Uncomment a row to ship that platform again.
+          # - os: macos-latest
+          #   crate: meridian
+          #   asset: meridian-macos-arm64
+          #   desktop: true
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - if: runner.os == 'Linux' && matrix.desktop
+        run: sudo apt-get update && sudo apt-get install -y $APT_DEPS
+      - if: matrix.desktop
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - if: matrix.desktop
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - if: matrix.desktop
+        run: pnpm install --frozen-lockfile
+      - if: matrix.desktop
+        run: pnpm build
+      - run: cargo build --release -p ${{ matrix.crate }}
+      - shell: bash
+        run: |
+          ext=; [ "$RUNNER_OS" = Windows ] && ext=.exe
+          cp "target/release/${{ matrix.crate }}$ext" "${{ matrix.asset }}"
+          # the updater and install.sh refuse a download that does not match this
+          sha256sum "${{ matrix.asset }}" > "${{ matrix.asset }}.sha256" 2>/dev/null \
+            || shasum -a 256 "${{ matrix.asset }}" > "${{ matrix.asset }}.sha256"
+          gh release upload "${{ needs.release.outputs.tag }}" \
+            "${{ matrix.asset }}" "${{ matrix.asset }}.sha256" --clobber
+
+  # ponytail: the release goes live only once every asset is uploaded.
+  publish:
+    if: github.event_name != 'pull_request'
+    needs: [release, binaries]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: gh release edit "${{ needs.release.outputs.tag }}" --draft=false

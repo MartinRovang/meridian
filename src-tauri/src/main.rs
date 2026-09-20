@@ -9,6 +9,7 @@ use clap::Parser;
 use meridian_core::config::{Config, Scope};
 
 mod shell;
+mod update;
 
 #[derive(Parser)]
 #[command(name = "meridian", version)]
@@ -25,6 +26,15 @@ struct Cli {
     /// Market scope for the in-process server: norway, scandinavia, nordics, europe or global.
     #[arg(long, default_value = "scandinavia")]
     scope: String,
+    /// Print the newer released version, if there is one, and exit.
+    #[arg(long)]
+    check_update: bool,
+    /// Download the newest release over this binary and restart.
+    #[arg(long)]
+    update: bool,
+    /// Write this app's icon to stdout as a PNG. install.sh uses it for the launcher entry.
+    #[arg(long)]
+    icon: bool,
 }
 
 fn main() {
@@ -39,6 +49,33 @@ fn main() {
         }
     }
     let cli = Cli::parse();
+
+    // ponytail: the updater is wired to flags, not a button. v1 has no settings screen to put one
+    // on, and `meridian --update` is the whole feature until there is.
+    if cli.icon {
+        use std::io::Write;
+        let _ = std::io::stdout().write_all(include_bytes!("../icons/128x128.png"));
+        return;
+    }
+    if cli.check_update {
+        match update::update_available().as_str() {
+            "" => println!("meridian {} is the newest release", update::VERSION),
+            v => println!("{v}"),
+        }
+        return;
+    }
+    if cli.update {
+        match update::update_available().as_str() {
+            "" => println!("meridian {} is already the newest release", update::VERSION),
+            // apply_update only returns on failure: on success it has re-execed as the new binary.
+            v => eprintln!(
+                "meridian: update to {v} failed: {}",
+                update::apply_update(v)
+            ),
+        }
+        return;
+    }
+
     let (base, token) = match &cli.api_url {
         Some(url) => {
             let token = cli

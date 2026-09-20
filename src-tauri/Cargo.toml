@@ -15,4 +15,7 @@ meridian-server = { path = "../crates/server" }
 clap.workspace = true
 tauri = { version = "2", features = [] }
 tauri-plugin-single-instance = "2"
+regex = "1"
+sha2 = "0.10"
+ureq.workspace = true
 urlencoding.workspace = true
