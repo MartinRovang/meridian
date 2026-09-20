@@ -15,7 +15,7 @@ use serde_json::{json, Value};
 use tiny_http::{Header, Method, Request, Response, Server};
 
 use meridian_core::config::Config;
-use meridian_core::{calc, quotes, store};
+use meridian_core::{calc, import, quotes, store};
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -139,6 +139,25 @@ pub fn body(req: &mut Request) -> Result<Value, Fail> {
         return Ok(json!({}));
     }
     serde_json::from_slice(&raw).map_err(|_| Fail::new(400, "bad body"))
+}
+
+/// Read a file body unchanged, capped.
+///
+/// Not `body`: a broker export is commonly UTF-16, and forcing those bytes through a JSON string
+/// would destroy the very encoding the parser exists to cope with.
+fn raw_body(req: &mut Request) -> Result<Vec<u8>, Fail> {
+    let mut raw = Vec::new();
+    req.as_reader()
+        .take(BODY_MAX as u64 + 1)
+        .read_to_end(&mut raw)
+        .map_err(|e| Fail::new(400, e.to_string()))?;
+    if raw.len() > BODY_MAX {
+        return Err(Fail::new(
+            413,
+            "that file is too large to be a positions export",
+        ));
+    }
+    Ok(raw)
 }
 
 /// The trailing path segment, for routes shaped /api/thing/:id.
@@ -388,6 +407,163 @@ fn trades(ctx: &Ctx, pid: &str, cash: f64) -> Out {
     }
 }
 
+/// What a broker export would do to a portfolio. Writes nothing.
+fn import_preview(ctx: &Ctx, pid: &str, file: &[u8]) -> Out {
+    let s = load(ctx)?;
+    let p = s
+        .portfolios
+        .iter()
+        .find(|p| p.id == pid)
+        .ok_or_else(|| Fail::new(404, "no such portfolio"))?;
+    // 422: the file arrived intact and is not a positions export. The page prints this verbatim,
+    // so it has to name what is wrong with the file rather than blame the request.
+    let rows = import::parse(file).map_err(|e| Fail::new(422, e.to_string()))?;
+    let plan = import::plan(&rows, p, &s.aliases);
+    serde_json::to_value(&plan).map_err(|e| Fail::new(500, e.to_string()))
+}
+
+/// Symbols that might be the fund a broker calls `name`, best first.
+///
+/// Always global scope: the export is whatever the user actually owns, and a EUR ETF listed in
+/// Frankfurt is invisible in the scandinavia scope the rest of the app may be running in.
+fn import_candidates(name: &str, currency: &str, last: Option<f64>) -> Out {
+    if name.trim().is_empty() {
+        return Ok(json!({ "candidates": [] }));
+    }
+    // Longest name first, stopping at the first form that answers: the most specific search that
+    // works is the one whose hits are used.
+    let hits = import::search_terms(name)
+        .iter()
+        .find_map(|t| {
+            let h = quotes::search(t, meridian_core::config::Scope::Global);
+            (!h.is_empty()).then_some(h)
+        })
+        .unwrap_or_default();
+
+    // Yahoo's search does not state a currency, so the quotes have to be fetched to learn it.
+    let symbols: Vec<String> = hits
+        .iter()
+        .take(quotes::MAX_PARALLEL)
+        .map(|h| h.symbol.clone())
+        .collect();
+    let priced: Vec<(String, meridian_core::types::Quote)> = quotes::fetch_many(&symbols)
+        .into_iter()
+        .filter_map(|(s, q)| q.map(|q| (s, q)))
+        .collect();
+    // Ranked by the two things the export knows about the listing the user actually holds: its
+    // currency, and the price the broker printed for it. Nothing is hidden, because an export that
+    // omits Valuta would otherwise leave nothing to choose from.
+    let mut ranked: Vec<(bool, Option<f64>, &String, &meridian_core::types::Quote)> = priced
+        .iter()
+        .map(|(sym, q)| {
+            (
+                q.currency.eq_ignore_ascii_case(currency),
+                import::price_gap(q.price, last),
+                sym,
+                q,
+            )
+        })
+        .collect();
+    ranked.sort_by(|a, b| {
+        b.0.cmp(&a.0).then(
+            a.1.unwrap_or(f64::MAX)
+                .partial_cmp(&b.1.unwrap_or(f64::MAX))
+                .unwrap_or(std::cmp::Ordering::Equal),
+        )
+    });
+
+    let out: Vec<Value> = ranked
+        .iter()
+        .map(|(currency_ok, gap, sym, q)| {
+            let hit = hits.iter().find(|h| h.symbol == **sym);
+            json!({
+                "symbol": sym,
+                "name": hit.map(|h| h.name.clone()).unwrap_or_default(),
+                "exchange": hit.map(|h| h.exchange.clone()).unwrap_or_default(),
+                "currency": q.currency,
+                "price": q.price,
+                "currency_ok": currency_ok,
+                // The broker's own price says this is the line, not merely a plausible one.
+                "exact": *currency_ok && gap.is_some_and(|g| g < import::PRICE_MATCH),
+            })
+        })
+        .collect();
+    Ok(json!({ "candidates": out }))
+}
+
+/// Write the rows the user approved, and remember the names they matched.
+fn import_apply(ctx: &Ctx, b: &Value) -> Out {
+    let pid = need_str(b, "portfolio_id")?;
+    let rows = b
+        .get("rows")
+        .and_then(|r| r.as_array())
+        .ok_or_else(|| Fail::new(400, "rows must be an array"))?;
+    let mut s = load(ctx)?;
+    let base = s.base_currency.clone();
+
+    // Learned before the rows are written, so a failure partway through still leaves the matching
+    // knowledge behind rather than making the user repeat it.
+    if let Some(a) = b.get("aliases").and_then(|a| a.as_object()) {
+        for (name, ticker) in a {
+            if let Some(t) = ticker.as_str() {
+                s.aliases.insert(name.clone(), t.to_uppercase());
+            }
+        }
+    }
+
+    let p = s
+        .portfolios
+        .iter_mut()
+        .find(|p| p.id == pid)
+        .ok_or_else(|| Fail::new(404, "no such portfolio"))?;
+    let mut applied = 0;
+    for r in rows {
+        let ticker = need_str(r, "ticker")?.to_uppercase();
+        let shares = need_f64(r, "shares")?;
+        let cost = need_f64(r, "cost_basis")?;
+        if shares < 0.0 || cost < 0.0 {
+            return Err(Fail::new(
+                400,
+                format!("{ticker}: shares and cost cannot be negative"),
+            ));
+        }
+        let name = r
+            .get("name")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
+        let currency = r
+            .get("cost_currency")
+            .and_then(|x| x.as_str())
+            .unwrap_or(&base)
+            .to_uppercase();
+        match p.holdings.iter_mut().find(|h| h.ticker == ticker) {
+            Some(h) => {
+                h.shares = shares;
+                h.cost_basis = cost;
+                h.cost_currency = currency;
+                // Name, class and target are the user's, not the broker's: an import updates the
+                // numbers it knows and leaves the ones it does not.
+            }
+            None => p.holdings.push(meridian_core::types::Holding {
+                id: meridian_core::types::new_id('h'),
+                ticker,
+                name,
+                cls: "Uncategorised".to_string(),
+                shares,
+                cost_basis: cost,
+                cost_currency: currency,
+                // The export has no target allocation. Zero means Rebalance keeps refusing until
+                // the user sets one, which is the correct refusal rather than an invented target.
+                target_pct: 0.0,
+            }),
+        }
+        applied += 1;
+    }
+    commit(ctx, &s)?;
+    Ok(json!({ "applied": applied }))
+}
+
 fn search(ctx: &Ctx, query: &str) -> Out {
     if query.trim().is_empty() {
         return Ok(json!({ "hits": [] }));
@@ -440,6 +616,16 @@ fn handle(ctx: &Ctx, token: &str, req: Request) {
         ("POST", "/api/refresh") => refresh(ctx, query.contains_key("force")),
         ("POST", "/api/portfolio") => body(&mut req).and_then(|b| create_portfolio(ctx, &b)),
         ("POST", "/api/holding") => body(&mut req).and_then(|b| put_holding(ctx, &b)),
+        ("POST", "/api/import/preview") => {
+            let pid = query.get("portfolio").cloned().unwrap_or_default();
+            raw_body(&mut req).and_then(|f| import_preview(ctx, &pid, &f))
+        }
+        ("GET", "/api/import/candidates") => import_candidates(
+            query.get("name").map(String::as_str).unwrap_or(""),
+            query.get("currency").map(String::as_str).unwrap_or(""),
+            query.get("last").and_then(|l| l.parse().ok()),
+        ),
+        ("POST", "/api/import/apply") => body(&mut req).and_then(|b| import_apply(ctx, &b)),
         ("PATCH", p) if tail(p, "/api/portfolio/").is_some() => {
             let id = tail(p, "/api/portfolio/")
                 .expect("checked just above")
@@ -889,5 +1075,203 @@ mod tests {
             Value::Null,
         );
         assert_eq!(code, 404);
+    }
+
+    /// The import routes take a file, not JSON, so they need their own sender.
+    fn send_file(port: u16, path: &str, token: &str, file: &[u8]) -> (u16, Value) {
+        let agent: ureq::Agent = ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .build()
+            .into();
+        let mut r = agent
+            .post(&format!("http://127.0.0.1:{port}{path}"))
+            .header("X-Meridian-Token", token)
+            .header("Content-Type", "application/octet-stream")
+            .send(file)
+            .expect("send");
+        (
+            r.status().as_u16(),
+            r.body_mut().read_json().unwrap_or(Value::Null),
+        )
+    }
+
+    const NORDNET: &[u8] = include_bytes!("../../core/tests/fixtures/nordnet_positions.csv");
+
+    fn portfolio_with(port: u16, token: &str, holdings: Vec<Value>) -> String {
+        let (_, p) = call(
+            port,
+            "POST",
+            "/api/portfolio",
+            token,
+            json!({ "name": "Test" }),
+        );
+        let pid = p["id"].as_str().expect("id").to_string();
+        for h in holdings {
+            let mut h = h;
+            h["portfolio_id"] = json!(pid);
+            call(port, "POST", "/api/holding", token, h);
+        }
+        pid
+    }
+
+    #[test]
+    fn a_preview_says_what_would_change_and_writes_nothing() {
+        let (_d, port, t) = up();
+        let pid = portfolio_with(port, &t, vec![]);
+        let (code, v) = send_file(
+            port,
+            &format!("/api/import/preview?portfolio={pid}"),
+            &t,
+            NORDNET,
+        );
+        assert_eq!(code, 200);
+        let changes = v["changes"].as_array().expect("changes");
+        assert_eq!(changes.len(), 2);
+        // Nothing is held and nothing has been taught, so both rows need a ticker from the user.
+        assert_eq!(changes[0]["action"], "unmatched");
+        assert_eq!(changes[0]["ticker"], Value::Null);
+        assert_eq!(changes[0]["cost_basis"], 25_000.0);
+        assert_eq!(changes[0]["currency"], "EUR");
+
+        // The preview must not have written anything.
+        let (_, state) = call(port, "GET", "/api/state", &t, Value::Null);
+        assert!(state["portfolios"][0]["holdings"]
+            .as_array()
+            .expect("holdings")
+            .is_empty());
+    }
+
+    #[test]
+    fn a_file_that_is_not_a_positions_export_is_refused_with_a_readable_reason() {
+        let (_d, port, t) = up();
+        let pid = portfolio_with(port, &t, vec![]);
+        let (code, v) = send_file(
+            port,
+            &format!("/api/import/preview?portfolio={pid}"),
+            &t,
+            b"just some text\nwith no columns\n",
+        );
+        assert_eq!(code, 422);
+        let msg = v["error"].as_str().expect("error");
+        assert!(
+            msg.contains("Navn") || msg.contains("positions export"),
+            "got {msg}"
+        );
+    }
+
+    #[test]
+    fn applying_an_import_writes_the_holdings_and_remembers_the_names() {
+        let (_d, port, t) = up();
+        let pid = portfolio_with(port, &t, vec![]);
+        let (code, v) = call(
+            port,
+            "POST",
+            "/api/import/apply",
+            &t,
+            json!({
+                "portfolio_id": pid,
+                "rows": [{
+                    "ticker": "xnas.de",
+                    "name": "Xtrackers NASDAQ 100 ETF 1C",
+                    "shares": 200.0,
+                    "cost_basis": 12_000.0,
+                    "cost_currency": "eur",
+                }],
+                "aliases": { "xtrackers nasdaq 100 etf 1c": "xnas.de" },
+            }),
+        );
+        assert_eq!(code, 200, "got {v}");
+        assert_eq!(v["applied"], 1);
+
+        let (_, state) = call(port, "GET", "/api/state", &t, Value::Null);
+        let h = &state["portfolios"][0]["holdings"][0];
+        assert_eq!(h["ticker"], "XNAS.DE");
+        assert_eq!(h["shares"], 200.0);
+        // The export carries no target allocation, so an imported holding starts at zero and
+        // Rebalance keeps refusing until the user sets one.
+        assert_eq!(h["target_pct"], 0.0);
+
+        // The second preview of the same file needs no clicks: the name is known now.
+        let (_, v) = send_file(
+            port,
+            &format!("/api/import/preview?portfolio={pid}"),
+            &t,
+            NORDNET,
+        );
+        let learned = v["changes"]
+            .as_array()
+            .expect("changes")
+            .iter()
+            .find(|c| c["name"] == "Xtrackers NASDAQ 100 ETF 1C")
+            .expect("the taught row");
+        assert_eq!(learned["ticker"], "XNAS.DE");
+        // The applied numbers are the file's own, so re-importing it is a no-op rather than a
+        // second write of the same figures.
+        assert_eq!(learned["action"], "unchanged", "got {learned}");
+    }
+
+    #[test]
+    fn an_import_never_removes_a_holding_the_file_does_not_mention() {
+        let (_d, port, t) = up();
+        let pid = portfolio_with(
+            port,
+            &t,
+            vec![json!({
+                "ticker": "EQNR.OL", "name": "Equinor ASA", "shares": 111.0,
+                "cost_basis": 38_000.0, "target_pct": 100.0, "cost_currency": "NOK",
+            })],
+        );
+        let (_, v) = send_file(
+            port,
+            &format!("/api/import/preview?portfolio={pid}"),
+            &t,
+            NORDNET,
+        );
+        assert_eq!(v["absent"], json!(["EQNR.OL"]));
+
+        call(
+            port,
+            "POST",
+            "/api/import/apply",
+            &t,
+            json!({
+                "portfolio_id": pid,
+                "rows": [{ "ticker": "XNAS.DE", "shares": 200.0, "cost_basis": 12_000.0 }],
+            }),
+        );
+        let (_, state) = call(port, "GET", "/api/state", &t, Value::Null);
+        let held: Vec<&str> = state["portfolios"][0]["holdings"]
+            .as_array()
+            .expect("holdings")
+            .iter()
+            .map(|h| h["ticker"].as_str().expect("ticker"))
+            .collect();
+        assert!(
+            held.contains(&"EQNR.OL"),
+            "the import deleted an untouched holding: {held:?}"
+        );
+        assert!(held.contains(&"XNAS.DE"));
+    }
+
+    #[test]
+    fn an_imported_row_with_negative_shares_is_refused_before_anything_is_written() {
+        let (_d, port, t) = up();
+        let pid = portfolio_with(port, &t, vec![]);
+        let (code, _) = call(
+            port,
+            "POST",
+            "/api/import/apply",
+            &t,
+            json!({
+                "portfolio_id": pid,
+                "rows": [{ "ticker": "XNAS.DE", "shares": -5.0, "cost_basis": 100.0 }],
+            }),
+        );
+        assert_eq!(code, 400);
+        let (_, state) = call(port, "GET", "/api/state", &t, Value::Null);
+        assert!(state["portfolios"][0]["holdings"]
+            .as_array()
+            .expect("h")
+            .is_empty());
     }
 }

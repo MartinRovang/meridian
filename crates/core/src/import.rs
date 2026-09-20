@@ -22,6 +22,12 @@ pub struct Row {
     pub shares: f64,
     /// Average cost per share, in `currency`. Norwegian brokers call this GAV.
     pub gav: f64,
+    /// The broker's own last price, when the export states one.
+    ///
+    /// This is what identifies the listing. The same fund trades in Frankfurt, London and Milan,
+    /// and its price in each is a different number; the one the broker printed belongs to the line
+    /// the user actually holds. Currency narrows the field to three, this usually narrows it to one.
+    pub last: Option<f64>,
 }
 
 impl Row {
@@ -60,6 +66,14 @@ const GAV: &[&str] = &[
     "gjennomsnittskurs",
     "snittpris",
     "kostpris",
+];
+const LAST: &[&str] = &[
+    "siste kurs",
+    "kurs",
+    "markedskurs",
+    "last",
+    "last price",
+    "price",
 ];
 
 /// Bytes to text, whatever the broker felt like emitting.
@@ -157,6 +171,7 @@ pub fn parse(bytes: &[u8]) -> Result<Vec<Row>, ImportError> {
     let gav = column(&headers, GAV).ok_or(ImportError::MissingColumn("GAV"))?;
     // Optional: a single-currency account export does not always bother stating it.
     let currency = column(&headers, CURRENCY);
+    let last = column(&headers, LAST);
 
     let rows: Vec<Row> = lines
         .filter_map(|line| {
@@ -168,6 +183,7 @@ pub fn parse(bytes: &[u8]) -> Result<Vec<Row>, ImportError> {
                 currency: currency.map(cell).unwrap_or("").to_uppercase(),
                 shares: num(cell(shares))?,
                 gav: num(cell(gav)).unwrap_or(0.0),
+                last: last.and_then(|i| num(cell(i))).filter(|p| *p > 0.0),
             })
         })
         .filter(|r| !r.name.is_empty())
@@ -205,6 +221,21 @@ pub fn search_terms(name: &str) -> Vec<String> {
     out.dedup();
     out
 }
+
+/// How wrong a candidate's price is against the one the broker printed, as a fraction.
+///
+/// None when the export stated no price, in which case the caller falls back to currency alone.
+pub fn price_gap(quote: f64, last: Option<f64>) -> Option<f64> {
+    let last = last?;
+    (last > 0.0 && quote > 0.0).then(|| (quote - last).abs() / last)
+}
+
+/// A candidate this close to the broker's printed price is the listing the user holds.
+///
+/// Half a percent rather than zero: the export was written at a different moment than the quote
+/// was fetched, so the two differ by whatever the fund moved in between. The wrong listings are
+/// wrong by a currency, which is whole percent, not fractions of one.
+pub const PRICE_MATCH: f64 = 0.005;
 
 /// The candidates whose quote is in the currency the broker stated.
 ///
@@ -349,6 +380,7 @@ mod tests {
             currency: "EUR".into(),
             shares,
             gav,
+            last: None,
         }
     }
 
@@ -441,6 +473,31 @@ mod tests {
     }
 
     #[test]
+    fn the_brokers_own_last_price_is_read_because_it_names_the_listing() {
+        let rows = parse(NORDNET).expect("parses");
+        assert_eq!(rows[0].last, Some(284.35));
+        assert_eq!(rows[1].last, Some(59.6));
+    }
+
+    #[test]
+    fn the_listing_the_user_holds_is_the_one_whose_price_matches() {
+        // Real numbers from the export and from Yahoo. XNAS.DE is the held line at 59.60 EUR;
+        // XNAS.L is the same fund in USD at 68.35, which is a 15% misprice that never errors.
+        let last = Some(59.6);
+        assert!(price_gap(59.60, last).expect("gap") < PRICE_MATCH);
+        assert!(price_gap(59.62, last).expect("gap") < PRICE_MATCH); // Milan, still the same price
+        assert!(price_gap(68.35, last).expect("gap") > PRICE_MATCH); // London in USD
+        assert!(price_gap(38.45, last).expect("gap") > PRICE_MATCH); // a different Xtrackers fund
+    }
+
+    #[test]
+    fn an_export_without_a_price_column_falls_back_to_currency_alone() {
+        assert_eq!(price_gap(59.60, None), None);
+        let raw = "Navn;Valuta;Antall;GAV\nHydro;NOK;10;1,5\n";
+        assert_eq!(parse(raw.as_bytes()).expect("parses")[0].last, None);
+    }
+
+    #[test]
     fn candidates_in_the_wrong_currency_are_dropped() {
         // The whole reason the Valuta column is read: the same fund lists in London in GBP and in
         // Frankfurt in EUR, and pricing a EUR holding off the GBP line is wrong by about 15%.
@@ -482,6 +539,8 @@ pub enum Action {
 pub struct Change {
     pub name: String,
     pub currency: String,
+    /// Passed to the candidate search, which uses it to pick the listing out of the field.
+    pub last: Option<f64>,
     pub shares: f64,
     pub cost_basis: f64,
     pub action: Action,
@@ -545,6 +604,7 @@ pub fn plan(rows: &[Row], p: &Portfolio, aliases: &HashMap<String, String>) -> P
             Change {
                 name: r.name.clone(),
                 currency: r.currency.clone(),
+                last: r.last,
                 shares: r.shares,
                 cost_basis: r.cost_basis(),
                 action,
