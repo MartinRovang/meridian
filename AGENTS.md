@@ -121,6 +121,24 @@ what-if the user retypes has no business making a request per keystroke. It
 buys the exception the same way, with its own tests, including one proving an
 unpriced holding is named rather than shocked as though it were worth nothing.
 
+## The Backtest screen
+
+The same series Analytics draws, against a benchmark over the same days.
+
+A benchmark is one share of one symbol, so it goes through
+`calc::allocation_history` exactly as the portfolio does: the same forward
+fill, the same conversion into base currency, the same refusal to value what it
+has no rate for. `GET /api/history?portfolio=X&benchmark=SYM` returns both, and
+without `benchmark` the response is unchanged, which is what Analytics reads.
+
+`calc::align` cuts the two to the days they share and rebases both to 100 on
+the first of them. A benchmark whose history starts later would otherwise be
+drawn from its own first day, and the two lines would compare spans that do not
+overlap.
+
+The screen says it charges no fees, spreads or tax, because it does not: a real
+account that merely keeps pace with an index has in fact fallen behind it.
+
 ## Caching quotes
 
 The cache is a `HashMap<String, Quote>` behind a mutex, mirrored to

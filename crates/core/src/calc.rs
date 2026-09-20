@@ -446,8 +446,79 @@ pub fn allocation_history(
     AllocationHistory { points, missing }
 }
 
+/// Two indexed series cut to the days they share, each rebased to 100 on the first of them.
+///
+/// Without the cut, a benchmark whose history starts later than the portfolio's would be drawn
+/// from its own first day, and the two lines would claim to compare spans that do not overlap.
+/// Both are rebased after the cut, so 100 means the same date on both lines.
+pub fn align(a: &[Point], b: &[Point]) -> (Vec<Point>, Vec<Point>) {
+    let days: BTreeMap<&str, f64> = b.iter().map(|p| (p.day.as_str(), p.index)).collect();
+    let pairs: Vec<(&str, f64, f64)> = a
+        .iter()
+        .filter_map(|p| {
+            days.get(p.day.as_str())
+                .map(|q| (p.day.as_str(), p.index, *q))
+        })
+        .collect();
+    let Some(&(_, first_a, first_b)) = pairs.first() else {
+        return (Vec::new(), Vec::new());
+    };
+    if first_a <= 0.0 || first_b <= 0.0 {
+        return (Vec::new(), Vec::new());
+    }
+    let rebase = |v: f64, base: f64| v / base * 100.0;
+    (
+        pairs
+            .iter()
+            .map(|(d, v, _)| Point {
+                day: (*d).to_string(),
+                index: rebase(*v, first_a),
+            })
+            .collect(),
+        pairs
+            .iter()
+            .map(|(d, _, v)| Point {
+                day: (*d).to_string(),
+                index: rebase(*v, first_b),
+            })
+            .collect(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
+
+    fn pts(days: &[(&str, f64)]) -> Vec<Point> {
+        days.iter()
+            .map(|(d, v)| Point {
+                day: (*d).to_string(),
+                index: *v,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn align_cuts_to_the_common_days_and_rebases_both_to_a_hundred() {
+        // The benchmark starts a day late. Drawing it from its own first day would compare two
+        // different spans and call the difference performance.
+        let (a, b) = align(
+            &pts(&[("d1", 100.0), ("d2", 110.0), ("d3", 121.0)]),
+            &pts(&[("d2", 50.0), ("d3", 55.0)]),
+        );
+        assert_eq!(a.len(), 2);
+        assert_eq!(a[0].day, "d2");
+        assert!((a[0].index - 100.0).abs() < 1e-9);
+        assert!((a[1].index - 110.0).abs() < 1e-9, "{:?}", a[1]);
+        assert!((b[0].index - 100.0).abs() < 1e-9);
+        assert!((b[1].index - 110.0).abs() < 1e-9, "{:?}", b[1]);
+    }
+
+    #[test]
+    fn align_of_series_that_never_overlap_is_empty_rather_than_invented() {
+        let (a, b) = align(&pts(&[("d1", 100.0)]), &pts(&[("d9", 100.0)]));
+        assert!(a.is_empty() && b.is_empty());
+    }
+
     use super::*;
     use crate::types::{Holding, Portfolio};
 

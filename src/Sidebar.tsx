@@ -11,7 +11,7 @@ const NAV: [string, string, string, boolean][] = [
   ['energy', 'Energy & shipping', 'ph-boat', false],
   ['rebalance', 'Rebalance', 'ph-scales', true],
   ['stress', 'Stress test', 'ph-warning-diamond', true],
-  ['backtest', 'Backtest', 'ph-clock-counter-clockwise', false],
+  ['backtest', 'Backtest', 'ph-clock-counter-clockwise', true],
   ['alerts', 'Alerts', 'ph-bell', false],
   ['rules', 'Rules', 'ph-funnel', false],
 ]

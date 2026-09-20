@@ -413,7 +413,7 @@ fn trades(ctx: &Ctx, pid: &str, cash: f64) -> Out {
 /// Histories are fetched once and kept: daily bars change once a day, so a chart drawn twice in a
 /// session costs nothing the second time. A symbol whose stored series already reaches yesterday
 /// is left alone.
-fn history_route(ctx: &Ctx, pid: &str) -> Out {
+fn history_route(ctx: &Ctx, pid: &str, benchmark: &str) -> Out {
     let s = load(ctx)?;
     let p = s
         .portfolios
@@ -421,7 +421,11 @@ fn history_route(ctx: &Ctx, pid: &str) -> Out {
         .find(|p| p.id == pid)
         .ok_or_else(|| Fail::new(404, "no such portfolio"))?;
 
+    let bench = benchmark.trim().to_uppercase();
     let mut wanted: Vec<String> = p.holdings.iter().map(|h| h.ticker.clone()).collect();
+    if !bench.is_empty() {
+        wanted.push(bench.clone());
+    }
     wanted.sort();
     wanted.dedup();
 
@@ -468,7 +472,37 @@ fn history_route(ctx: &Ctx, pid: &str) -> Out {
     }
 
     let out = calc::allocation_history(p, &s.base_currency, &loaded, &fx);
-    serde_json::to_value(&out).map_err(|e| Fail::new(500, e.to_string()))
+    if bench.is_empty() {
+        return serde_json::to_value(&out).map_err(|e| Fail::new(500, e.to_string()));
+    }
+
+    // A benchmark is one share of one symbol, so it goes through the same function the portfolio
+    // does: the same forward fill, the same fx conversion into base currency, the same refusal to
+    // value anything it has no rate for. A second implementation of that would drift from this one.
+    let one = meridian_core::types::Portfolio {
+        id: String::new(),
+        name: bench.clone(),
+        owner: String::new(),
+        band_pct: 0.0,
+        holdings: vec![meridian_core::types::Holding {
+            id: String::new(),
+            ticker: bench.clone(),
+            name: bench.clone(),
+            cls: String::new(),
+            shares: 1.0,
+            cost_basis: 0.0,
+            cost_currency: s.base_currency.clone(),
+            target_pct: 0.0,
+        }],
+    };
+    let b = calc::allocation_history(&one, &s.base_currency, &loaded, &fx);
+    let (points, bench_points) = calc::align(&out.points, &b.points);
+    serde_json::to_value(json!({
+        "points": points,
+        "missing": out.missing,
+        "benchmark": { "symbol": bench, "points": bench_points },
+    }))
+    .map_err(|e| Fail::new(500, e.to_string()))
 }
 
 /// What a broker export would do to a portfolio. Writes nothing.
@@ -673,6 +707,7 @@ fn handle(ctx: &Ctx, token: &str, req: Request) {
         ("GET", "/api/history") => history_route(
             ctx,
             query.get("portfolio").map(String::as_str).unwrap_or(""),
+            query.get("benchmark").map(String::as_str).unwrap_or(""),
         ),
         ("GET", "/api/trades") => trades(
             ctx,

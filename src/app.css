@@ -177,3 +177,12 @@ tr.breached td:first-child { box-shadow: inset 2px 0 0 var(--color-accent); }
 .shock-inputs { display: flex; flex-wrap: wrap; gap: var(--space-3) 24px; margin-bottom: var(--space-3); }
 .shock-inputs label { display: flex; align-items: center; gap: 8px; font-size: 13px; }
 .shock-inputs .input { width: 84px; text-align: right; }
+
+/* The benchmark is drawn behind and dimmer: it is the thing being compared against, not the
+   subject of the screen. */
+/* No dash pattern: the chart is stretched horizontally, so a dash comes out as a dotted smear.
+   Dimmer and grey is enough to say which line is the subject. */
+.line-compare { stroke: var(--color-neutral-500); }
+.legend-line { display: flex; gap: 20px; font-size: 12px; margin-top: 8px; }
+.legend-line span { display: flex; align-items: center; gap: 7px; }
+.legend-line i { width: 14px; height: 0; border-top: 2px solid currentColor; }
