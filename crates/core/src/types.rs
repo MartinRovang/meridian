@@ -44,6 +44,10 @@ pub struct Store {
     /// parse. A parse failure is treated as corruption and the file is moved aside.
     #[serde(default)]
     pub aliases: HashMap<String, String>,
+    /// What buzzes your phone. Default for the same reason as `aliases`: a store written before
+    /// this field existed must still parse, or the user's positions are treated as corruption.
+    #[serde(default)]
+    pub alerts: crate::alerts::Alerts,
 }
 
 impl Store {
@@ -53,6 +57,7 @@ impl Store {
             base_currency: base_currency.to_string(),
             portfolios: Vec::new(),
             aliases: HashMap::new(),
+            alerts: crate::alerts::Alerts::default(),
         }
     }
 }

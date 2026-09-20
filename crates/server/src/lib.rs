@@ -11,12 +11,13 @@
 use std::collections::HashMap;
 use std::io::Read;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use serde_json::{json, Value};
 use tiny_http::{Header, Method, Request, Response, Server};
 
 use meridian_core::config::Config;
-use meridian_core::{calc, discover, history, import, optimize, quotes, store, universe};
+use meridian_core::{alerts, calc, discover, history, import, optimize, quotes, store, universe};
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -524,6 +525,125 @@ fn set_targets(ctx: &Ctx, b: &Value) -> Out {
     Ok(json!({ "written": by_id.len() }))
 }
 
+/// How often the alert loop looks. Fifteen minutes is frequent enough to matter and rare enough
+/// that Yahoo's unofficial endpoints do not notice.
+const ALERT_EVERY: Duration = Duration::from_secs(15 * 60);
+
+/// Which rules were firing at the last check.
+fn load_firing(ctx: &Ctx) -> Vec<String> {
+    std::fs::read(ctx.cfg.alert_state_path())
+        .ok()
+        .and_then(|raw| serde_json::from_slice(&raw).ok())
+        .unwrap_or_default()
+}
+
+fn save_firing(ctx: &Ctx, keys: &[String]) {
+    if let Ok(raw) = serde_json::to_vec(keys) {
+        let _ = std::fs::write(ctx.cfg.alert_state_path(), raw);
+    }
+}
+
+/// Everything currently true, from the same figures the Dashboard shows.
+///
+/// Returns the firings rather than sending them, so the loop and the test button share one
+/// evaluation and the rules stay testable without a network.
+fn current_firings(ctx: &Ctx) -> Result<(alerts::Alerts, Vec<alerts::Firing>), Fail> {
+    let s = load(ctx)?;
+    let cache = ctx.cache.lock().expect("cache lock").clone();
+    let now = quotes::now();
+    let oldest = s
+        .portfolios
+        .iter()
+        .flat_map(|p| p.holdings.iter())
+        .filter_map(|h| cache.get(&h.ticker))
+        .map(|q| q.ts)
+        .min();
+    let views: Vec<calc::PortfolioView> = s
+        .portfolios
+        .iter()
+        .map(|p| calc::view_portfolio(p, &s.base_currency, &cache))
+        .collect();
+    let drift: HashMap<String, Vec<calc::DriftRow>> = views
+        .iter()
+        .map(|v| (v.id.clone(), calc::drift(v)))
+        .collect();
+    let age = oldest.map(|t| now - t).unwrap_or(0);
+    let firing = alerts::evaluate(&s.alerts, &views, &drift, age);
+    Ok((s.alerts, firing))
+}
+
+/// Check, send what is new, remember what is still true.
+fn run_alerts(ctx: &Ctx) -> Result<usize, Fail> {
+    let (cfg, firing) = current_firings(ctx)?;
+    if !cfg.live() {
+        return Ok(0);
+    }
+    let (fresh, keys) = alerts::newly_firing(&firing, &load_firing(ctx));
+    for f in &fresh {
+        // A failed send is not a reason to stop: the next rule may reach the phone, and the state
+        // is written either way so a broken topic cannot queue up a hundred messages.
+        if let Err(e) = alerts::notify(&cfg, &f.text) {
+            eprintln!("meridian: alert not sent: {e}");
+        }
+    }
+    save_firing(ctx, &keys);
+    Ok(fresh.len())
+}
+
+fn read_alerts(ctx: &Ctx) -> Out {
+    let s = load(ctx)?;
+    serde_json::to_value(&s.alerts).map_err(|e| Fail::new(500, e.to_string()))
+}
+
+/// Replace the alert configuration wholesale.
+fn write_alerts(ctx: &Ctx, b: &Value) -> Out {
+    let mut cfg: alerts::Alerts =
+        serde_json::from_value(b.clone()).map_err(|e| Fail::new(400, e.to_string()))?;
+    cfg.topic = cfg.topic.trim().to_string();
+    cfg.server = cfg.server.trim().to_string();
+    // A topic with a slash in it would address a different topic than the one shown on screen.
+    if cfg.topic.contains(['/', '?', '#', ' ']) {
+        return Err(Fail::new(400, "a topic cannot contain spaces or / ? #"));
+    }
+    if !cfg.server.is_empty() && !cfg.server.starts_with("https://") {
+        // Plain http would put the alert text, and the topic, on the wire in clear.
+        return Err(Fail::new(400, "the server must be https"));
+    }
+    for l in &mut cfg.levels {
+        if l.id.is_empty() {
+            l.id = meridian_core::types::new_id('l');
+        }
+        l.ticker = l.ticker.trim().to_uppercase();
+        if l.price <= 0.0 {
+            return Err(Fail::new(400, "a level price must be above zero"));
+        }
+    }
+    let mut s = load(ctx)?;
+    s.alerts = cfg.clone();
+    commit(ctx, &s)?;
+    serde_json::to_value(&cfg).map_err(|e| Fail::new(500, e.to_string()))
+}
+
+/// Send one notification now, so the topic can be proven to reach the phone.
+fn test_alert(ctx: &Ctx) -> Out {
+    let s = load(ctx)?;
+    if !s.alerts.live() {
+        return Err(Fail::new(400, "alerts are off, or no topic is set"));
+    }
+    alerts::notify(
+        &s.alerts,
+        "Test from Meridian. Alerts are reaching this phone.",
+    )
+    .map_err(|e| Fail::new(502, e))?;
+    Ok(json!({ "sent": true }))
+}
+
+/// What would fire right now, without sending anything.
+fn preview_alerts(ctx: &Ctx) -> Out {
+    let (_, firing) = current_firings(ctx)?;
+    serde_json::to_value(&firing).map_err(|e| Fail::new(500, e.to_string()))
+}
+
 /// Search a market for a basket of n, choosing on the earlier part of the window only.
 ///
 /// The first call for a market fetches a history per listing, which is slow and then cached.
@@ -831,6 +951,10 @@ fn handle(ctx: &Ctx, token: &str, req: Request) {
     let out: Out = match (req.method().as_str(), path.as_str()) {
         ("GET", "/api/state") => state(ctx),
         ("GET", "/api/search") => search(ctx, query.get("q").map(String::as_str).unwrap_or("")),
+        ("GET", "/api/alerts") => read_alerts(ctx),
+        ("POST", "/api/alerts") => body(&mut req).and_then(|b| write_alerts(ctx, &b)),
+        ("POST", "/api/alerts/test") => test_alert(ctx),
+        ("GET", "/api/alerts/preview") => preview_alerts(ctx),
         ("GET", "/api/markets") => Ok(json!({ "markets": universe::SCOPES })),
         ("GET", "/api/discover") => discover_route(ctx, &query),
         ("GET", "/api/optimize") => optimize_route(
@@ -901,6 +1025,19 @@ pub fn serve(cfg: Config, port: u16, token: String) -> std::io::Result<u16> {
         refreshing: Arc::new(Mutex::new(())),
         cfg,
     };
+    // The alert loop lives here rather than in the desktop app because the app is shut at
+    // exactly the moment an alert matters.
+    let watcher = ctx.clone();
+    std::thread::spawn(move || loop {
+        std::thread::sleep(ALERT_EVERY);
+        // Prices first: rules read the cache, and a rule evaluated against yesterday's quotes
+        // would fire on yesterday's news.
+        let _ = refresh(&watcher, false);
+        if let Err(e) = run_alerts(&watcher) {
+            eprintln!("meridian: alert check failed: {}", e.1);
+        }
+    });
+
     std::thread::spawn(move || {
         for req in server.incoming_requests() {
             let (ctx, token) = (ctx.clone(), token.clone());
@@ -1164,6 +1301,70 @@ mod tests {
             err["error"].as_str().expect("error").contains("60"),
             "the message should say what they did sum to: {err}"
         );
+    }
+
+    #[test]
+    fn alerts_round_trip_and_reject_a_topic_that_would_address_something_else() {
+        let (_d, port, t) = up();
+        let (code, got) = call(
+            port,
+            "POST",
+            "/api/alerts",
+            &t,
+            json!({"enabled": true, "topic": "meridian-abc123", "drift": true,
+                   "big_move": true, "big_move_pct": 4.0, "stale": true, "levels": [
+                       {"id": "", "ticker": "eqnr.ol", "price": 300.0, "above": true}]}),
+        );
+        assert_eq!(code, 200, "{got}");
+        assert_eq!(
+            got["levels"][0]["ticker"], "EQNR.OL",
+            "upper-cased on the way in"
+        );
+        assert!(
+            got["levels"][0]["id"]
+                .as_str()
+                .is_some_and(|s| !s.is_empty()),
+            "a level gets an id so it can be removed later"
+        );
+        let (_, back) = call(port, "GET", "/api/alerts", &t, Value::Null);
+        assert_eq!(back["topic"], "meridian-abc123");
+        assert_eq!(back["big_move_pct"], 4.0);
+
+        // A slash would post to a different topic than the one the screen displays.
+        let (bad, _) = call(
+            port,
+            "POST",
+            "/api/alerts",
+            &t,
+            json!({"enabled": true, "topic": "mine/else"}),
+        );
+        assert_eq!(bad, 400);
+        // and plain http would put the alert text and the topic on the wire in clear
+        let (insecure, _) = call(
+            port,
+            "POST",
+            "/api/alerts",
+            &t,
+            json!({"enabled": true, "topic": "mine", "server": "http://ntfy.example"}),
+        );
+        assert_eq!(insecure, 400);
+    }
+
+    #[test]
+    fn a_test_alert_refuses_rather_than_posting_nowhere() {
+        // No topic means no destination. Sending anyway would hit ntfy.sh with an empty path,
+        // and a test that appears to succeed while reaching nobody is worse than an error.
+        let (_d, port, t) = up();
+        let (code, err) = call(port, "POST", "/api/alerts/test", &t, Value::Null);
+        assert_eq!(code, 400, "{err}");
+    }
+
+    #[test]
+    fn nothing_fires_from_an_empty_store() {
+        let (_d, port, t) = up();
+        let (code, got) = call(port, "GET", "/api/alerts/preview", &t, Value::Null);
+        assert_eq!(code, 200);
+        assert!(got.as_array().expect("array").is_empty(), "{got}");
     }
 
     #[test]

@@ -78,6 +78,15 @@ impl Config {
         self.store_dir.join("portfolios.json")
     }
 
+    /// Which alert rules were firing at the last check, so a lasting breach notifies once.
+    ///
+    /// Its own file rather than a field in the store: it changes every quarter hour and the store
+    /// is rewritten whole under a lock, so keeping them together would mean rewriting every
+    /// position to record that nothing happened.
+    pub fn alert_state_path(&self) -> PathBuf {
+        self.store_dir.join("alert-state.json")
+    }
+
     pub fn quotes_path(&self) -> PathBuf {
         self.store_dir.join("quotes.json")
     }

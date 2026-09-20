@@ -193,3 +193,9 @@ tr.breached td:first-child { box-shadow: inset 2px 0 0 var(--color-accent); }
 .corr th { font-weight: 400; color: var(--color-neutral-300); padding: 4px 8px; text-align: right; white-space: nowrap; }
 .corr thead th { text-align: center; }
 .corr td { padding: 4px 8px; text-align: right; min-width: 54px; border-radius: var(--radius-sm); }
+
+.rules { display: flex; flex-direction: column; gap: 12px; font-size: 13px; }
+.rules label { display: flex; align-items: center; gap: 8px; }
+.rules .input { width: 78px; text-align: right; }
+.input.wide { width: 260px; }
+.firing { margin: 0; padding-left: 18px; font-size: 13px; display: flex; flex-direction: column; gap: 6px; }

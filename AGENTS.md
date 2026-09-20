@@ -258,6 +258,34 @@ turnover from a Euronext export, plus Stockholm and Copenhagen large caps by
 hand, since Euronext carries neither. A stale entry is visible rather than
 silent: a delisted symbol has no usable history and is named on the screen.
 
+## Alerts
+
+`crates/core/src/alerts.rs` decides, `meridian-server` schedules, ntfy delivers.
+
+**The loop lives in the server, not the app.** A desktop app is shut at exactly
+the moment an alert matters. `serve` spawns a thread that every 15 minutes
+refreshes prices and then evaluates, in that order: rules read the quote cache,
+and a rule evaluated against yesterday's prices fires on yesterday's news.
+
+**A rule notifies once.** `newly_firing` compares what is true now against
+`alert-state.json` and sends only the difference, so a drift breach that lasts a
+fortnight buzzes on the day it starts. A rule that stops firing is forgotten, so
+the next breach is news again. That file is separate from `portfolios.json`
+because it changes every quarter hour and the store is rewritten whole under a
+lock.
+
+**An ntfy topic is a password printed on every message.** There is no
+authentication on a topic: anyone who knows the name receives everything. So the
+screen generates a random topic rather than letting one be typed, the server
+refuses a topic containing `/ ? #` or a space, it refuses a plain-http server,
+and above all **no notification carries an amount, a share count or a portfolio
+total.** A ticker and a percentage, and the app is one tap away for the rest.
+There is a test asserting it, and it should stay that way.
+
+`evaluate` is a pure function over the views and drift rows the Dashboard
+already computes, so every rule is testable without a network or a clock. Only
+`notify` touches the wire.
+
 ## Caching quotes
 
 The cache is a `HashMap<String, Quote>` behind a mutex, mirrored to

@@ -3,6 +3,7 @@
 //! This crate deliberately links no HTTP server, no Tauri and no desktop library, so the
 //! server that wraps it can be deployed to a box with nothing installed on it.
 
+pub mod alerts;
 pub mod calc;
 pub mod config;
 pub mod discover;
