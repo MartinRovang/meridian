@@ -42,3 +42,51 @@ export function annualised(points: Point[]): number | null {
   const years = points.length / 252
   return (Math.pow(points[points.length - 1].index / 100, 1 / years) - 1) * 100
 }
+
+/// One Bollinger reading: the window mean and the envelope around it. Null during the warm-up,
+/// where there are not yet `span` days to average.
+export type Band = { mid: number; upper: number; lower: number }
+
+/// Bollinger bands over the indexed series, aligned one-for-one with `points`.
+///
+/// The deviation is the population one, over the window itself: the window is the whole of what
+/// is being averaged, not a sample drawn from something larger. This differs from `volatility`
+/// above, deliberately, and both match their own convention.
+export function bollinger(points: Point[], span = 20, k = 2): (Band | null)[] {
+  return points.map((_, i) => {
+    if (i + 1 < span) return null
+    const w = points.slice(i + 1 - span, i + 1).map((p) => p.index)
+    const mid = w.reduce((a, v) => a + v, 0) / span
+    const sd = Math.sqrt(w.reduce((a, v) => a + (v - mid) ** 2, 0) / span)
+    return { mid, upper: mid + k * sd, lower: mid - k * sd }
+  })
+}
+
+/// Relative strength, 0 to 100, with Wilder's smoothing. Null until there are `span` changes.
+///
+/// ponytail: a running pair of averages rather than a rolling window. Wilder's smoothing is
+/// recursive by definition, so there is nothing to slice.
+export function rsi(points: Point[], span = 14): (number | null)[] {
+  const out: (number | null)[] = points.map(() => null)
+  if (points.length <= span) return out
+  let gain = 0
+  let loss = 0
+  for (let i = 1; i <= span; i++) {
+    const d = points[i].index - points[i - 1].index
+    if (d >= 0) gain += d
+    else loss -= d
+  }
+  gain /= span
+  loss /= span
+  // A run with no falls at all divides by zero. 100 is the limit it is heading for, and it is
+  // what every charting package shows there.
+  const value = () => (loss === 0 ? 100 : 100 - 100 / (1 + gain / loss))
+  out[span] = value()
+  for (let i = span + 1; i < points.length; i++) {
+    const d = points[i].index - points[i - 1].index
+    gain = (gain * (span - 1) + Math.max(d, 0)) / span
+    loss = (loss * (span - 1) + Math.max(-d, 0)) / span
+    out[i] = value()
+  }
+  return out
+}

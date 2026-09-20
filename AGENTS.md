@@ -282,9 +282,37 @@ and above all **no notification carries an amount, a share count or a portfolio
 total.** A ticker and a percentage, and the app is one tap away for the rest.
 There is a test asserting it, and it should stay that way.
 
+**The portfolio has its own rule and its own threshold.** `portfolio_move`
+reads `PortfolioView.day_pct` and fires at `portfolio_move_pct`, defaulting to
+2% rather than the holding rule's 5%: a basket of a dozen names rarely moves as
+far as any one of them, so sharing one number would mean the portfolio rule
+never fired. Its message names the portfolio and the percentage, and nothing
+else, for the same reason every other message does.
+
 `evaluate` is a pure function over the views and drift rows the Dashboard
 already computes, so every rule is testable without a network or a clock. Only
 `notify` touches the wire.
+
+## Indicators on the charts
+
+`src/stats.ts` computes them, `Line` draws them, `useIndicators` holds the three
+switches so Analytics and Backtest cannot drift apart. Nothing reaches the
+server: the indexed series is already on the client.
+
+`bollinger` uses the **population** deviation over its own window, while
+`volatility` above it uses the **sample** one. That is deliberate. A Bollinger
+window is the whole of what is being averaged; a run of daily returns is a
+sample of a process. Both match their own convention, and neither should be
+changed to match the other.
+
+The warm-up days have no reading, so `bollinger` and `rsi` return arrays as long
+as the series with nulls at the front. The chart starts the envelope later
+rather than drawing it flat at the first value it can compute, which would
+invent a band where there is no window to compute one from.
+
+RSI gets its own picture under the chart rather than a second axis on it. Two
+scales in one frame is the chart mistake that makes a flat line look like a
+rally.
 
 ## Caching quotes
 

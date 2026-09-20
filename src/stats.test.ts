@@ -1,5 +1,5 @@
 import { expect, test } from 'vitest'
-import { annualised, drawdown, volatility, type Point } from './stats'
+import { annualised, bollinger, drawdown, rsi, volatility, type Point } from './stats'
 
 const series = (values: number[]): Point[] =>
   values.map((index, i) => ({ day: `2026-01-${String(i + 1).padStart(2, '0')}`, index }))
@@ -52,4 +52,50 @@ test('a run under a year is not annualised, because it would be a preposterous c
 test('a doubling over exactly two years annualises to the square root of two', () => {
   const values = Array.from({ length: 504 }, (_, i) => 100 * Math.pow(2, i / 503))
   expect(annualised(series(values))).toBeCloseTo((Math.SQRT2 - 1) * 100, 1)
+})
+
+test('a flat series sits exactly on its own band, with no width', () => {
+  // Nothing moved, so the mean is the value and the deviation is zero. A band with width here
+  // would mean the arithmetic invented movement that never happened.
+  const b = bollinger(series(Array(30).fill(100)), 20, 2)
+  expect(b.slice(0, 19).every((x) => x === null)).toBe(true)
+  expect(b[19]).toEqual({ mid: 100, upper: 100, lower: 100 })
+})
+
+test('the band is the window mean plus and minus k deviations of the window', () => {
+  const values = Array.from({ length: 20 }, (_, i) => 100 + i)
+  const b = bollinger(series(values), 20, 2)
+  const mean = values.reduce((a, v) => a + v, 0) / 20
+  // Population deviation, not the sample one: the window is the whole of what is being averaged,
+  // and every published Bollinger band is drawn this way.
+  const sd = Math.sqrt(values.reduce((a, v) => a + (v - mean) ** 2, 0) / 20)
+  expect(b[19]?.mid).toBeCloseTo(mean, 9)
+  expect(b[19]?.upper).toBeCloseTo(mean + 2 * sd, 9)
+  expect(b[19]?.lower).toBeCloseTo(mean - 2 * sd, 9)
+})
+
+test('a series shorter than the window has no band at all', () => {
+  expect(bollinger(series([100, 101, 102]), 20, 2).every((x) => x === null)).toBe(true)
+})
+
+test('a series that only rises is pinned at 100, one that only falls at 0', () => {
+  const up = rsi(series(Array.from({ length: 30 }, (_, i) => 100 + i)), 14)
+  expect(up[13]).toBeNull()
+  expect(up[14]).toBeCloseTo(100, 9)
+  const down = rsi(series(Array.from({ length: 30 }, (_, i) => 200 - i)), 14)
+  expect(down[14]).toBeCloseTo(0, 9)
+})
+
+test('rsi smooths the way Wilder did, not as a plain rolling mean', () => {
+  // Fourteen equal gains then one loss of the same size. A plain mean would drop the average
+  // gain to 13/14 of its value; Wilder's smoothing keeps 13/14 of it and adds nothing, which is
+  // the same number here, so the loss side is what separates the two: 1/14 of the loss, not the
+  // whole of it over a window of one.
+  const values = [100]
+  for (let i = 0; i < 14; i++) values.push(values[values.length - 1] + 1)
+  values.push(values[values.length - 1] - 1)
+  const r = rsi(series(values), 14)
+  const avgGain = (14 / 14) * (13 / 14)
+  const avgLoss = 1 / 14
+  expect(r[15]).toBeCloseTo(100 - 100 / (1 + avgGain / avgLoss), 6)
 })

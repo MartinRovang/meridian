@@ -6,7 +6,8 @@ import { Stat } from '../Stat'
 import { TickerSearch } from '../TickerSearch'
 import { useApp } from '../store'
 import { annualised, drawdown, volatility } from '../stats'
-import { Line, type Point } from './Line'
+import { useIndicators } from '../Indicators'
+import { Line, Rsi, type Point } from './Line'
 
 type Bench = { symbol: string; points: Point[] }
 type History = { points: Point[]; missing: string[]; benchmark?: Bench }
@@ -71,6 +72,7 @@ export function Backtest() {
 
 function Result({ hist }: { hist: History }) {
   const { points, missing, benchmark } = hist
+  const [shown, switches] = useIndicators()
   if (points.length < 2) {
     return (
       <p className="text-muted">
@@ -100,7 +102,9 @@ function Result({ hist }: { hist: History }) {
         <div className="panel-head">
           Indexed to 100 on {points[0].day}
         </div>
-        <Line points={points} compare={benchmark?.points} />
+        {switches}
+        <Line points={points} compare={benchmark?.points} bands={shown.bands} ma={shown.ma} />
+        {shown.rsi ? <Rsi points={points} /> : null}
         <div className="legend-line">
           <span className={mine >= 0 ? 'up' : 'down'}>
             <i /> This portfolio

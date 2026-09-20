@@ -592,7 +592,14 @@ fn run_alerts(ctx: &Ctx) -> Result<usize, Fail> {
 
 fn read_alerts(ctx: &Ctx) -> Out {
     let s = load(ctx)?;
-    serde_json::to_value(&s.alerts).map_err(|e| Fail::new(500, e.to_string()))
+    // A store written before these rules existed carries zero, and the evaluator reads zero as
+    // "use the default". The screen would show the zero, which reads as "every move fires".
+    let cfg = alerts::Alerts {
+        big_move_pct: s.alerts.threshold(),
+        portfolio_move_pct: s.alerts.portfolio_threshold(),
+        ..s.alerts
+    };
+    serde_json::to_value(&cfg).map_err(|e| Fail::new(500, e.to_string()))
 }
 
 /// Replace the alert configuration wholesale.
@@ -1312,7 +1319,8 @@ mod tests {
             "/api/alerts",
             &t,
             json!({"enabled": true, "topic": "meridian-abc123", "drift": true,
-                   "big_move": true, "big_move_pct": 4.0, "stale": true, "levels": [
+                   "big_move": true, "big_move_pct": 4.0, "portfolio_move": true,
+                   "stale": true, "levels": [
                        {"id": "", "ticker": "eqnr.ol", "price": 300.0, "above": true}]}),
         );
         assert_eq!(code, 200, "{got}");
@@ -1329,6 +1337,13 @@ mod tests {
         let (_, back) = call(port, "GET", "/api/alerts", &t, Value::Null);
         assert_eq!(back["topic"], "meridian-abc123");
         assert_eq!(back["big_move_pct"], 4.0);
+        assert_eq!(back["portfolio_move"], true);
+        // Sent as nothing, so it comes back as the default rather than as the zero the evaluator
+        // would read as "use the default" and the screen would read as "every move fires".
+        assert_eq!(
+            back["portfolio_move_pct"],
+            meridian_core::alerts::DEFAULT_PORTFOLIO_MOVE_PCT
+        );
 
         // A slash would post to a different topic than the one the screen displays.
         let (bad, _) = call(

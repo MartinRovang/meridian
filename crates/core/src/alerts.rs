@@ -19,6 +19,10 @@ pub const DEFAULT_SERVER: &str = "https://ntfy.sh";
 /// A daily move at or beyond this is worth a phone buzzing, unless told otherwise.
 pub const DEFAULT_MOVE_PCT: f64 = 5.0;
 
+/// A whole portfolio moving this far in a day is a day worth knowing about. Lower than the
+/// holding threshold on purpose: a basket of a dozen names rarely moves as far as any one of them.
+pub const DEFAULT_PORTFOLIO_MOVE_PCT: f64 = 2.0;
+
 /// Quotes older than this mean the figures on screen are not today's.
 pub const STALE_SECS: i64 = 6 * 3600;
 
@@ -46,6 +50,8 @@ pub struct Alerts {
     pub drift: bool,
     pub big_move: bool,
     pub big_move_pct: f64,
+    pub portfolio_move: bool,
+    pub portfolio_move_pct: f64,
     pub stale: bool,
     pub levels: Vec<Level>,
 }
@@ -63,6 +69,13 @@ impl Alerts {
             self.big_move_pct
         } else {
             DEFAULT_MOVE_PCT
+        }
+    }
+    pub fn portfolio_threshold(&self) -> f64 {
+        if self.portfolio_move_pct > 0.0 {
+            self.portfolio_move_pct
+        } else {
+            DEFAULT_PORTFOLIO_MOVE_PCT
         }
     }
     /// Configured well enough to send anything at all.
@@ -130,6 +143,19 @@ pub fn evaluate(
                     });
                 }
             }
+        }
+    }
+
+    if cfg.portfolio_move {
+        let limit = cfg.portfolio_threshold();
+        for v in views.iter().filter(|v| v.day_pct.abs() >= limit) {
+            let way = if v.day_pct > 0.0 { "up" } else { "down" };
+            out.push(Firing {
+                key: format!("pmove:{}", v.id),
+                // The name, not the value: which portfolio it is cannot be guessed from a
+                // percentage, and the percentage is the whole of what the phone needs to say.
+                text: format!("{} is {} {:.1}% today", v.name, way, v.day_pct.abs()),
+            });
         }
     }
 
@@ -314,12 +340,47 @@ mod tests {
     }
 
     #[test]
+    fn the_portfolio_fires_on_its_own_threshold_not_the_holdings_one() {
+        // A basket moves less than anything in it, so one number cannot serve both: at the
+        // holding threshold a portfolio would essentially never fire.
+        let mut v = vec![view(vec![holding("EQNR.OL", -3.0, 100.0, true)])];
+        v[0].day_pct = -3.0;
+        let mut c = cfg();
+        c.big_move = true;
+        c.big_move_pct = 5.0;
+        assert!(
+            evaluate(&c, &v, &HashMap::new(), 0).is_empty(),
+            "neither the holding nor the portfolio is past 5%"
+        );
+
+        c.portfolio_move = true;
+        let fired = evaluate(&c, &v, &HashMap::new(), 0);
+        assert_eq!(fired.len(), 1, "{fired:?}");
+        assert_eq!(fired[0].key, "pmove:p1");
+        assert!(fired[0].text.contains("down 3.0%"), "{fired:?}");
+
+        // A threshold means at or past it: a rule set at 3% that stays quiet on a 3% day reads
+        // as broken to the person who set it.
+        c.portfolio_move_pct = 3.0;
+        assert_eq!(
+            evaluate(&c, &v, &HashMap::new(), 0).len(),
+            1,
+            "exactly at it"
+        );
+
+        // and its own threshold is respected, not just its own switch
+        c.portfolio_move_pct = 4.0;
+        assert!(evaluate(&c, &v, &HashMap::new(), 0).is_empty());
+    }
+
+    #[test]
     fn a_notification_never_carries_an_amount() {
         // The topic is public. Tickers and percentages are the deal; position sizes are not.
         let v = vec![view(vec![holding("EQNR.OL", -9.0, 100.0, true)])];
         let mut c = cfg();
         c.big_move = true;
         c.stale = true;
+        c.portfolio_move = true;
         let fired = evaluate(&c, &v, &HashMap::new(), STALE_SECS);
         assert!(!fired.is_empty());
         for f in &fired {

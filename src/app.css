@@ -162,6 +162,15 @@ tr.breached td:first-child { box-shadow: inset 2px 0 0 var(--color-accent); }
 .line { width: 100%; height: 200px; display: block; }
 .line-path { fill: none; stroke-width: 1.5; vector-effect: non-scaling-stroke; }
 .line-base { stroke: var(--color-neutral-700); stroke-dasharray: 3 4; stroke-width: 1; vector-effect: non-scaling-stroke; }
+/* Indicators. The envelope is drawn behind everything and barely there: it is a backdrop the
+   price sits inside, not a third line competing with the price for attention. */
+.line-band { fill: var(--color-accent); fill-opacity: 0.1; stroke: none; }
+.line-ma { stroke: var(--color-accent); stroke-opacity: 0.75; }
+.line-rsi { stroke: var(--color-accent); }
+.rsi { width: 100%; height: 72px; display: block; }
+.indicators { display: flex; flex-wrap: wrap; gap: 16px; font-size: 12px; margin-bottom: 8px; }
+.indicators label { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+
 .stat-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: var(--space-3); }
 @media (max-width: 900px) { .stat-row { grid-template-columns: repeat(2, 1fr); } }
 .stat-cell { display: flex; flex-direction: column; gap: 6px; font-size: 12px; }

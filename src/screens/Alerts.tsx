@@ -11,6 +11,8 @@ type Config = {
   drift: boolean
   big_move: boolean
   big_move_pct: number
+  portfolio_move: boolean
+  portfolio_move_pct: number
   stale: boolean
   levels: Level[]
 }
@@ -161,6 +163,27 @@ export function Alerts() {
               onChange={(e) => set({ big_move_pct: Number(e.target.value) })}
             />
             <span>% in a day</span>
+          </label>
+          <label>
+            <input
+              type="checkbox"
+              checked={cfg.portfolio_move}
+              onChange={(e) => set({ portfolio_move: e.target.checked })}
+            />
+            <span>The whole portfolio moves more than</span>
+            <input
+              className="input num"
+              type="number"
+              min={0.5}
+              step={0.5}
+              value={cfg.portfolio_move_pct}
+              onChange={(e) => set({ portfolio_move_pct: Number(e.target.value) })}
+            />
+            <span>
+              % in a day
+              <span className="text-muted"> a basket moves less than anything in it, so this
+              wants a smaller number than the one above</span>
+            </span>
           </label>
           <label>
             <input

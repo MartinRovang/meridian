@@ -3,15 +3,17 @@ import { get } from '../api'
 import { pct, signed } from '../format'
 import { SkelScreen } from '../Skeleton'
 import { Stat } from '../Stat'
+import { useIndicators } from '../Indicators'
 import { useApp } from '../store'
 import { annualised, drawdown, volatility } from '../stats'
-import { Line, type Point } from './Line'
+import { Line, Rsi, type Point } from './Line'
 
 type History = { points: Point[]; missing: string[] }
 
 export function Analytics() {
   const { state, pid } = useApp()
   const [hist, setHist] = useState<History | null>(null)
+  const [shown, switches] = useIndicators()
   const [error, setError] = useState('')
 
   const p = state?.portfolios.find((x) => x.id === pid) ?? state?.portfolios[0]
@@ -64,7 +66,9 @@ export function Analytics() {
 
       <section className="panel">
         <div className="panel-head">Indexed to 100 at the start</div>
-        <Line points={points} />
+        {switches}
+        <Line points={points} bands={shown.bands} ma={shown.ma} />
+        {shown.rsi ? <Rsi points={points} /> : null}
       </section>
 
       <div className="stat-row">
