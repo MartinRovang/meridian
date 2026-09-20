@@ -330,6 +330,39 @@ RSI gets its own picture under the chart rather than a second axis on it. Two
 scales in one frame is the chart mistake that makes a flat line look like a
 rally.
 
+## Rules
+
+`crates/core/src/rules.rs`. A rule is one field, one comparison and one number,
+over figures the app already computes: a holding's weight, drift, day move,
+profit or price, the portfolio's day move, a class's share. `evaluate` is pure,
+like `alerts::evaluate`, and takes the same views and drift rows.
+
+**One field, one comparison, one number, and no expression language.** Two
+conditions that must both hold are two rules. An AND/OR grammar is a parser, a
+precedence table and an error message for every way of writing one wrong, and
+nothing so far has needed it.
+
+**Unpriced holdings are skipped by every rule**, not compared as zeros. An
+unpriced holding's weight and price are zeroed because they are unknown, so a
+"weight below 5%" rule would otherwise fire on every holding the app cannot
+price. Same for a missing drift row: no target set is not a drift of zero, and
+a class the portfolio does not hold is not a weight of zero.
+
+**A comparison holds at its threshold.** A rule set at 40% that stays quiet on
+exactly 40% reads as broken to whoever set it.
+
+**Notify rides the alert loop.** `rules::firings` turns hits into
+`alerts::Firing`s, keyed `rule:<id>:<subject>`, so a rule watching every holding
+buzzes once per holding and then stays quiet, through the same `newly_firing`
+tracking as everything else. It is gated on `alerts.live()` for the same reason
+the other rules are, and its text carries a ticker or a class and a figure,
+never an amount.
+
+`GET/POST /api/rules` replaces the list wholesale, the way the alert
+configuration does. `GET /api/rules/hits` is the screen's own view and does not
+care whether alerts are configured: a rule is something to look at first and a
+notification second.
+
 ## Caching quotes
 
 The cache is a `HashMap<String, Quote>` behind a mutex, mirrored to

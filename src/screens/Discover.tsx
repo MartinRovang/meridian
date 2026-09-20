@@ -316,7 +316,11 @@ function Outlook({ out }: { out: Result }) {
     <section className="panel">
       <div className="panel-head">What this implies about the next {months} months</div>
       <div className="stat-row">
-        <Stat label="Central estimate" value={`${signed(f.expected_pct)}%`} />
+        <Stat
+          label="Central estimate"
+          value={`${signed(f.expected_pct)}%`}
+          tone={f.expected_pct < 0 ? 'down' : 'up'}
+        />
         {/* Each end carries its own colour. Painting the whole interval red because it starts
             below zero says "this is bad" about a range that is mostly above zero. */}
         <Stat
@@ -329,14 +333,18 @@ function Outlook({ out }: { out: Result }) {
             </>
           }
         />
+        {/* Coloured by their own sign, like every other return in the app. A red +23.5%
+            because the forecast missed says the money fell, which it did not. How badly the
+            forecast missed is a sentence below, where it can say so in words. */}
         <Stat
           label="Last time, predicted"
           value={`${signed(f.predicted_test_pct)}%`}
+          tone={f.predicted_test_pct < 0 ? 'down' : 'up'}
         />
         <Stat
           label="Last time, actual"
           value={`${signed(f.realised_test_pct)}%`}
-          tone={Math.abs(miss) > 10 ? 'down' : undefined}
+          tone={f.realised_test_pct < 0 ? 'down' : 'up'}
         />
       </div>
       <p className="warn-soft">

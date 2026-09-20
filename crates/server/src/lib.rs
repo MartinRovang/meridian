@@ -17,7 +17,9 @@ use serde_json::{json, Value};
 use tiny_http::{Header, Method, Request, Response, Server};
 
 use meridian_core::config::Config;
-use meridian_core::{alerts, calc, discover, history, import, optimize, quotes, store, universe};
+use meridian_core::{
+    alerts, calc, discover, history, import, optimize, quotes, rules, store, universe,
+};
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -548,6 +550,32 @@ fn save_firing(ctx: &Ctx, keys: &[String]) {
 /// Returns the firings rather than sending them, so the loop and the test button share one
 /// evaluation and the rules stay testable without a network.
 fn current_firings(ctx: &Ctx) -> Result<(alerts::Alerts, Vec<alerts::Firing>), Fail> {
+    let (s, views, drift, age) = snapshot(ctx)?;
+    let mut firing = alerts::evaluate(&s.alerts, &views, &drift, age);
+    // Rules reach the phone through the same loop and the same once-only tracking. They are
+    // gated on the same switch: a configuration with nowhere to send has nowhere to send these
+    // either, and firing into the void would still consume the one notification.
+    if s.alerts.live() {
+        firing.extend(rules::firings(
+            &rules::evaluate(&s.rules, &views, &drift),
+            &s.rules,
+        ));
+    }
+    Ok((s.alerts, firing))
+}
+
+/// The store, the views, the drift rows and the age of the oldest quote, computed once.
+///
+/// Three callers need the same four things, and computing them twice in one request is how two
+/// screens start disagreeing about what is true.
+type Snapshot = (
+    meridian_core::types::Store,
+    Vec<calc::PortfolioView>,
+    HashMap<String, Vec<calc::DriftRow>>,
+    i64,
+);
+
+fn snapshot(ctx: &Ctx) -> Result<Snapshot, Fail> {
     let s = load(ctx)?;
     let cache = ctx.cache.lock().expect("cache lock").clone();
     let now = quotes::now();
@@ -568,8 +596,45 @@ fn current_firings(ctx: &Ctx) -> Result<(alerts::Alerts, Vec<alerts::Firing>), F
         .map(|v| (v.id.clone(), calc::drift(v)))
         .collect();
     let age = oldest.map(|t| now - t).unwrap_or(0);
-    let firing = alerts::evaluate(&s.alerts, &views, &drift, age);
-    Ok((s.alerts, firing))
+    Ok((s, views, drift, age))
+}
+
+/// Every rule currently true, for the Rules screen.
+///
+/// Unlike the alert path this does not care whether alerts are configured: a rule is a thing to
+/// look at on a screen first, and a notification second.
+fn rule_hits(ctx: &Ctx) -> Out {
+    let (s, views, drift, _) = snapshot(ctx)?;
+    let hits = rules::evaluate(&s.rules, &views, &drift);
+    serde_json::to_value(&hits).map_err(|e| Fail::new(500, e.to_string()))
+}
+
+fn read_rules(ctx: &Ctx) -> Out {
+    let s = load(ctx)?;
+    serde_json::to_value(&s.rules).map_err(|e| Fail::new(500, e.to_string()))
+}
+
+/// Replace the rule list wholesale, the way the alert configuration is replaced.
+fn write_rules(ctx: &Ctx, b: &Value) -> Out {
+    let mut list: Vec<rules::Rule> =
+        serde_json::from_value(b.clone()).map_err(|e| Fail::new(400, e.to_string()))?;
+    for r in &mut list {
+        if r.id.is_empty() {
+            r.id = meridian_core::types::new_id('r');
+        }
+        r.ticker = r.ticker.trim().to_uppercase();
+        r.name = r.name.trim().to_string();
+        if r.field == rules::Field::ClassWeight && r.cls.trim().is_empty() {
+            return Err(Fail::new(400, "a class rule needs a class"));
+        }
+        if !r.value.is_finite() {
+            return Err(Fail::new(400, "a rule needs a number to compare against"));
+        }
+    }
+    let mut s = load(ctx)?;
+    s.rules = list.clone();
+    commit(ctx, &s)?;
+    serde_json::to_value(&list).map_err(|e| Fail::new(500, e.to_string()))
 }
 
 /// Check, send what is new, remember what is still true.
@@ -962,6 +1027,9 @@ fn handle(ctx: &Ctx, token: &str, req: Request) {
         ("POST", "/api/alerts") => body(&mut req).and_then(|b| write_alerts(ctx, &b)),
         ("POST", "/api/alerts/test") => test_alert(ctx),
         ("GET", "/api/alerts/preview") => preview_alerts(ctx),
+        ("GET", "/api/rules") => read_rules(ctx),
+        ("POST", "/api/rules") => body(&mut req).and_then(|b| write_rules(ctx, &b)),
+        ("GET", "/api/rules/hits") => rule_hits(ctx),
         ("GET", "/api/markets") => Ok(json!({ "markets": universe::SCOPES })),
         ("GET", "/api/discover") => discover_route(ctx, &query),
         ("GET", "/api/optimize") => optimize_route(
@@ -1308,6 +1376,46 @@ mod tests {
             err["error"].as_str().expect("error").contains("60"),
             "the message should say what they did sum to: {err}"
         );
+    }
+
+    #[test]
+    fn rules_round_trip_and_a_class_rule_without_a_class_is_refused() {
+        let (_d, port, t) = up();
+        let (code, got) = call(
+            port,
+            "POST",
+            "/api/rules",
+            &t,
+            json!([{"id": "", "name": "  Too concentrated  ", "enabled": true, "notify": true,
+                    "field": "weight", "op": "above", "value": 40.0, "ticker": "eqnr.ol",
+                    "cls": ""}]),
+        );
+        assert_eq!(code, 200, "{got}");
+        assert_eq!(got[0]["ticker"], "EQNR.OL", "upper-cased on the way in");
+        assert_eq!(got[0]["name"], "Too concentrated", "trimmed");
+        assert!(
+            got[0]["id"].as_str().is_some_and(|s| !s.is_empty()),
+            "a rule gets an id so it can be removed later"
+        );
+
+        let (_, back) = call(port, "GET", "/api/rules", &t, Value::Null);
+        assert_eq!(back[0]["field"], "weight");
+        assert_eq!(back[0]["value"], 40.0);
+
+        // A class rule with no class would silently match nothing for ever.
+        let (bad, _) = call(
+            port,
+            "POST",
+            "/api/rules",
+            &t,
+            json!([{"field": "class_weight", "op": "above", "value": 30.0, "enabled": true}]),
+        );
+        assert_eq!(bad, 400);
+
+        // Nothing is held, so nothing can be firing, but the screen still gets its list.
+        let (hits, body) = call(port, "GET", "/api/rules/hits", &t, Value::Null);
+        assert_eq!(hits, 200);
+        assert_eq!(body.as_array().map(|a| a.len()), Some(0), "{body}");
     }
 
     #[test]

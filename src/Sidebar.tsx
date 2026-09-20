@@ -14,7 +14,7 @@ const NAV: [string, string, string, boolean][] = [
   ['stress', 'Stress test', 'ph-warning-diamond', true],
   ['backtest', 'Backtest', 'ph-clock-counter-clockwise', true],
   ['alerts', 'Alerts', 'ph-bell', true],
-  ['rules', 'Rules', 'ph-funnel', false],
+  ['rules', 'Rules', 'ph-funnel', true],
 ]
 
 export function Sidebar() {

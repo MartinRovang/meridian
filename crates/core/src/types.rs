@@ -48,6 +48,9 @@ pub struct Store {
     /// this field existed must still parse, or the user's positions are treated as corruption.
     #[serde(default)]
     pub alerts: crate::alerts::Alerts,
+    /// Saved conditions over the figures the app already computes. Same reason for the default.
+    #[serde(default)]
+    pub rules: Vec<crate::rules::Rule>,
 }
 
 impl Store {
@@ -58,6 +61,7 @@ impl Store {
             portfolios: Vec::new(),
             aliases: HashMap::new(),
             alerts: crate::alerts::Alerts::default(),
+            rules: Vec::new(),
         }
     }
 }

@@ -176,6 +176,22 @@ tr.breached td:first-child { box-shadow: inset 2px 0 0 var(--color-accent); }
 .range-picker { display: flex; gap: 6px; margin-bottom: 8px; }
 .range-picker .btn { padding: 3px 10px; font-size: 12px; }
 
+/* A rule is one long line of controls. It wraps rather than scrolls, and each row is separated
+   so two rules do not read as one. */
+.rule-row { align-items: center; gap: 8px 12px; padding-bottom: var(--space-3); border-bottom: 1px solid var(--color-neutral-800); }
+.rule-row:last-of-type { border-bottom: none; }
+.rule-row .input.pick { font-size: 12px; }
+.rule-row .input.wide { width: 160px; }
+/* The field names are sentences, so the box is wide enough to read one without clipping it. */
+.rule-row .input.pick.field-pick { min-width: 232px; }
+.rule-row .input.num { width: 72px; }
+
+/* A firing rule is a name and a sentence, neither of which fits the legend's fixed columns.
+   Not `.hits`: that is the search dropdown, and it is absolutely positioned. */
+.rule-hits { display: flex; flex-direction: column; gap: 6px; font-size: 13px; }
+.rule-hit { display: flex; gap: 12px; }
+.rule-hit > span:first-child { min-width: 180px; }
+
 .stat-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: var(--space-3); }
 @media (max-width: 900px) { .stat-row { grid-template-columns: repeat(2, 1fr); } }
 .stat-cell { display: flex; flex-direction: column; gap: 6px; font-size: 12px; }

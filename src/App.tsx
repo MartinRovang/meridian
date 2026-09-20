@@ -10,6 +10,7 @@ import { Backtest } from './screens/Backtest'
 import { Optimize } from './screens/Optimize'
 import { Discover } from './screens/Discover'
 import { Alerts } from './screens/Alerts'
+import { Rules } from './screens/Rules'
 import { useApp } from './store'
 
 const TITLES: Record<string, [string, string]> = {
@@ -21,6 +22,7 @@ const TITLES: Record<string, [string, string]> = {
   optimize: ['Act', 'Optimize weights'],
   discover: ['Examine', 'Discover'],
   alerts: ['Act', 'Alerts'],
+  rules: ['Act', 'Rules'],
 }
 
 export function App() {
@@ -87,6 +89,8 @@ export function App() {
           <Discover />
         ) : screen === 'alerts' ? (
           <Alerts />
+        ) : screen === 'rules' ? (
+          <Rules />
         ) : (
           <p className="text-muted">{title} is not built yet.</p>
         )}
