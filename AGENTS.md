@@ -75,6 +75,29 @@ The preview route takes raw bytes rather than JSON: these exports are commonly
 UTF-16, and a JSON string would destroy the encoding the parser exists to cope
 with.
 
+## Price history and Analytics
+
+`crates/core/src/history.rs` stores one JSON file per symbol under
+`<store>/history/`. Adjusted close, not close: an unadjusted series reports
+every dividend as a loss on the ex-date.
+
+`calc::allocation_history` is **not** the portfolio's past performance, and the
+screen says so out loud. Meridian stores no transactions, so it cannot know
+what was held last year; every point values today's share count at that day's
+prices. Anything that presents it as realised performance is a lie about
+someone's money.
+
+Three rules, each mutation-checked:
+
+- A null close is a day that did not trade: dropped, never zeroed.
+- Values forward-fill, because exchanges keep different holidays.
+- A missing fx history drops the holding and names it. A rate of 1.0 would
+  value a euro as a krone.
+
+The statistics live in `src/stats.ts` with their own tests, because they are
+money figures computed in TypeScript and the screen around them is not
+testable without a browser.
+
 ## Caching quotes
 
 The cache is a `HashMap<String, Quote>` behind a mutex, mirrored to

@@ -2,6 +2,7 @@ import { useEffect } from 'react'
 import { apiBase, post } from './api'
 import { Sidebar } from './Sidebar'
 import { Splash } from './Splash'
+import { Analytics } from './screens/Analytics'
 import { Builder } from './screens/Builder'
 import { Dashboard } from './screens/Dashboard'
 import { Rebalance } from './screens/Rebalance'
@@ -9,6 +10,7 @@ import { useApp } from './store'
 
 const TITLES: Record<string, [string, string]> = {
   dashboard: ['Overview', 'Portfolio overview'],
+  analytics: ['Examine', 'Analytics'],
   builder: ['Construct', 'Portfolio builder'],
   rebalance: ['Act', 'Rebalance proposal'],
 }
@@ -61,6 +63,8 @@ export function App() {
         ) : null}
         {screen === 'dashboard' ? (
           <Dashboard />
+        ) : screen === 'analytics' ? (
+          <Analytics />
         ) : screen === 'builder' ? (
           <Builder />
         ) : screen === 'rebalance' ? (

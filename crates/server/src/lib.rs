@@ -8,6 +8,7 @@
 //! Auth is one shared secret in X-Meridian-Token. There is one store per server and one token
 //! that opens it. Accounts are a separate project.
 
+use std::collections::HashMap;
 use std::io::Read;
 use std::sync::{Arc, Mutex};
 
@@ -15,7 +16,7 @@ use serde_json::{json, Value};
 use tiny_http::{Header, Method, Request, Response, Server};
 
 use meridian_core::config::Config;
-use meridian_core::{calc, import, quotes, store};
+use meridian_core::{calc, history, import, quotes, store};
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -407,6 +408,69 @@ fn trades(ctx: &Ctx, pid: &str, cash: f64) -> Out {
     }
 }
 
+/// What today's allocation would have done, day by day.
+///
+/// Histories are fetched once and kept: daily bars change once a day, so a chart drawn twice in a
+/// session costs nothing the second time. A symbol whose stored series already reaches yesterday
+/// is left alone.
+fn history_route(ctx: &Ctx, pid: &str) -> Out {
+    let s = load(ctx)?;
+    let p = s
+        .portfolios
+        .iter()
+        .find(|p| p.id == pid)
+        .ok_or_else(|| Fail::new(404, "no such portfolio"))?;
+
+    let mut wanted: Vec<String> = p.holdings.iter().map(|h| h.ticker.clone()).collect();
+    wanted.sort();
+    wanted.dedup();
+
+    let mut loaded: HashMap<String, history::Series> = HashMap::new();
+    let mut stale = Vec::new();
+    for sym in &wanted {
+        match history::load(&ctx.cfg, sym) {
+            Some(series) if history::is_current(&series) => {
+                loaded.insert(sym.clone(), series);
+            }
+            _ => stale.push(sym.clone()),
+        }
+    }
+    for (sym, got) in history::fetch_many(&stale) {
+        if let Some(series) = got {
+            let _ = history::save(&ctx.cfg, &sym, &series);
+            loaded.insert(sym, series);
+        }
+    }
+
+    // Which fx pairs are needed is only knowable once the histories say which currencies are in
+    // play, exactly as with quotes.
+    let mut pairs: Vec<String> = loaded
+        .values()
+        .filter_map(|series| quotes::fx_symbol(&series.currency, &s.base_currency))
+        .collect();
+    pairs.sort();
+    pairs.dedup();
+    let mut fx: HashMap<String, history::Series> = HashMap::new();
+    let mut stale_fx = Vec::new();
+    for pair in &pairs {
+        match history::load(&ctx.cfg, pair) {
+            Some(series) if history::is_current(&series) => {
+                fx.insert(pair.clone(), series);
+            }
+            _ => stale_fx.push(pair.clone()),
+        }
+    }
+    for (pair, got) in history::fetch_many(&stale_fx) {
+        if let Some(series) = got {
+            let _ = history::save(&ctx.cfg, &pair, &series);
+            fx.insert(pair, series);
+        }
+    }
+
+    let out = calc::allocation_history(p, &s.base_currency, &loaded, &fx);
+    serde_json::to_value(&out).map_err(|e| Fail::new(500, e.to_string()))
+}
+
 /// What a broker export would do to a portfolio. Writes nothing.
 fn import_preview(ctx: &Ctx, pid: &str, file: &[u8]) -> Out {
     let s = load(ctx)?;
@@ -606,6 +670,10 @@ fn handle(ctx: &Ctx, token: &str, req: Request) {
     let out: Out = match (req.method().as_str(), path.as_str()) {
         ("GET", "/api/state") => state(ctx),
         ("GET", "/api/search") => search(ctx, query.get("q").map(String::as_str).unwrap_or("")),
+        ("GET", "/api/history") => history_route(
+            ctx,
+            query.get("portfolio").map(String::as_str).unwrap_or(""),
+        ),
         ("GET", "/api/trades") => trades(
             ctx,
             query.get("portfolio").map(String::as_str).unwrap_or(""),

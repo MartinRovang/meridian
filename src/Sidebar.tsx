@@ -1,11 +1,11 @@
 import { useApp } from './store'
 
-// The eleven rows of the design's sidebar. The three v1 screens are clickable; the rest are
-// shown greyed so the shape of the finished app is visible from the start.
+// The eleven rows of the design's sidebar. The built screens are clickable; the rest are shown
+// greyed so the shape of the finished app is visible from the start.
 const NAV: [string, string, string, boolean][] = [
   ['dashboard', 'Dashboard', 'ph-squares-four', true],
   ['builder', 'Builder', 'ph-sliders-horizontal', true],
-  ['analytics', 'Analytics', 'ph-chart-line-up', false],
+  ['analytics', 'Analytics', 'ph-chart-line-up', true],
   ['sentiment', 'Sentiment', 'ph-pulse', false],
   ['bonds', 'Fixed income', 'ph-bank', false],
   ['energy', 'Energy & shipping', 'ph-boat', false],

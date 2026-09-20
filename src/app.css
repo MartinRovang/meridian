@@ -156,3 +156,18 @@ tr.breached td:first-child { box-shadow: inset 2px 0 0 var(--color-accent); }
 .picker { display: flex; gap: 8px; align-items: center; }
 .picker .input { font-size: 12px; padding: 4px 8px; }
 .picker .input.cell { width: 104px; text-align: left; }
+
+/* Analytics. One line, drawn by hand: a chart library to render a polyline and a fill would be
+   more configuration than code. */
+.line { width: 100%; height: 200px; display: block; }
+.line-path { fill: none; stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+.line-base { stroke: var(--color-neutral-700); stroke-dasharray: 3 4; stroke-width: 1; vector-effect: non-scaling-stroke; }
+.stat-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: var(--space-3); }
+@media (max-width: 900px) { .stat-row { grid-template-columns: repeat(2, 1fr); } }
+.stat-cell { display: flex; flex-direction: column; gap: 6px; font-size: 12px; }
+.stat-value { font-size: 20px; font-variant-numeric: tabular-nums; }
+/* Not .warn: this is a standing caveat about what the chart means, not a failure. */
+.warn-soft {
+  font-size: 12px; color: var(--color-neutral-300); max-width: 68ch;
+  border-left: 2px solid var(--color-accent); padding-left: 12px; margin: 0;
+}

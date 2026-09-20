@@ -103,6 +103,15 @@ pub fn fetch(symbol: &str) -> Option<Series> {
     parse_series(&body)
 }
 
+/// True when the series already reaches yesterday.
+///
+/// Yesterday, not today: today's bar does not exist until the exchange has traded, so asking for
+/// one would refetch every symbol all day. Dates are YYYY-MM-DD, which compares correctly as text.
+pub fn is_current(s: &Series) -> bool {
+    let cutoff = day(chrono::Utc::now().timestamp() - 86_400);
+    s.last().is_some_and(|b| b.day >= cutoff)
+}
+
 /// Five years of daily closes for several symbols, several at a time.
 pub fn fetch_many(symbols: &[String]) -> Vec<(String, Option<Series>)> {
     crate::par::map(symbols, fetch)
