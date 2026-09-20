@@ -62,9 +62,10 @@ export const useApp = create<App>((set, getState) => ({
       tick(0)
       await getState().load()
       tick(1)
-      // ponytail: the splash exists because THIS call is slow, one network round trip per held
-      // symbol plus its fx pair. A failure here is not fatal: cached prices still render, and the
-      // dashboard's stale banner explains itself.
+      // ponytail: the splash exists because THIS call can be slow: a round trip per held symbol
+      // plus its fx pairs, eight at a time. Symbols quoted in the last minute are skipped, so a
+      // second window costs nothing. A failure here is not fatal: cached prices still render, and
+      // the dashboard's stale banner explains itself. No force, unlike the Refresh button.
       await post('/api/refresh').catch(() => undefined)
       await getState().load()
       tick(2)

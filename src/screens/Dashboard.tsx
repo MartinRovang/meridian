@@ -32,7 +32,9 @@ export function Dashboard() {
 
   const refresh = async () => {
     setBusy(true)
-    await post('/api/refresh').catch(() => undefined)
+    // force: the button exists to override the ttl. Clicking Refresh and getting the same cached
+    // number back because it is fifty seconds old reads as a broken button.
+    await post('/api/refresh?force=1').catch(() => undefined)
     await load()
     setBusy(false)
   }

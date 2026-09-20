@@ -9,6 +9,8 @@
 //! stale prices rather than breaking it.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
 use std::time::Duration;
 
 use crate::config::Config;
@@ -33,6 +35,58 @@ pub fn age_secs(q: &Quote, now: i64) -> i64 {
 
 pub fn is_stale(q: &Quote, now: i64) -> bool {
     age_secs(q, now) > STALE_AFTER
+}
+
+/// A quote younger than this is not worth refetching. Two windows opened a moment apart, or a
+/// second client booting against a hosted server, should cost nothing. An explicit Refresh passes
+/// a ttl of 0 and refetches regardless: the user asking for prices now means now.
+pub const REFRESH_TTL: i64 = 60;
+
+/// The most symbols in flight at once. Yahoo's endpoint is unofficial and unpaid; eight parallel
+/// requests is a portfolio asking politely, not a scraper.
+pub const MAX_PARALLEL: usize = 8;
+
+/// Which of `wanted` actually have to be fetched: the ones with no quote at all, and the ones
+/// whose quote has aged past `ttl`.
+///
+/// ponytail: this is the whole cache policy. It is a filter over a HashMap because the working set
+/// is one quote per held symbol, a few dozen at most. A cache server for that would be a daemon,
+/// a network hop and a fallback path to guard a few hundred bytes.
+pub fn needs_fetch(cache: &Cache, wanted: &[String], ttl: i64, now: i64) -> Vec<String> {
+    wanted
+        .iter()
+        .filter(|s| cache.get(*s).is_none_or(|q| age_secs(q, now) >= ttl))
+        .cloned()
+        .collect()
+}
+
+/// Fetch every symbol, up to `MAX_PARALLEL` at a time.
+///
+/// The results come back in completion order, not input order: every caller either inserts them
+/// into a map or sorts them for display.
+pub fn fetch_many(symbols: &[String]) -> Vec<(String, Option<Quote>)> {
+    fetch_many_with(symbols, fetch)
+}
+
+/// ponytail: scoped threads and an atomic cursor, which is a worker pool in nine lines. A runtime
+/// would mean making the whole server async to await one burst of requests per refresh.
+fn fetch_many_with<F>(symbols: &[String], f: F) -> Vec<(String, Option<Quote>)>
+where
+    F: Fn(&str) -> Option<Quote> + Sync,
+{
+    let next = AtomicUsize::new(0);
+    let out = Mutex::new(Vec::with_capacity(symbols.len()));
+    std::thread::scope(|sc| {
+        for _ in 0..symbols.len().min(MAX_PARALLEL) {
+            sc.spawn(|| loop {
+                let i = next.fetch_add(1, Ordering::Relaxed);
+                let Some(sym) = symbols.get(i) else { return };
+                let q = f(sym);
+                out.lock().expect("fetch_many lock").push((sym.clone(), q));
+            });
+        }
+    });
+    out.into_inner().expect("fetch_many lock")
 }
 
 /// The price out of a chart response, or None when Yahoo does not know the symbol.
@@ -323,5 +377,85 @@ mod tests {
         std::fs::create_dir_all(&cfg.store_dir).expect("mkdir");
         std::fs::write(cfg.quotes_path(), b"garbage").expect("write");
         assert!(load(&cfg).is_empty());
+    }
+
+    fn q(ts: i64) -> Quote {
+        Quote {
+            price: 1.0,
+            prev_close: 1.0,
+            currency: "NOK".into(),
+            ts,
+        }
+    }
+
+    fn syms(n: usize) -> Vec<String> {
+        (0..n).map(|i| format!("S{i}")).collect()
+    }
+
+    #[test]
+    fn a_symbol_with_no_quote_at_all_is_always_fetched() {
+        let cache = Cache::new();
+        assert_eq!(needs_fetch(&cache, &syms(2), REFRESH_TTL, 1_000), syms(2));
+    }
+
+    #[test]
+    fn a_quote_younger_than_the_ttl_is_left_alone() {
+        let mut cache = Cache::new();
+        cache.insert("S0".into(), q(1_000));
+        // 30 seconds old against a 60 second ttl: the second window to open costs no requests.
+        assert!(needs_fetch(&cache, &syms(1), REFRESH_TTL, 1_030).is_empty());
+    }
+
+    #[test]
+    fn a_quote_older_than_the_ttl_is_fetched_again() {
+        let mut cache = Cache::new();
+        cache.insert("S0".into(), q(1_000));
+        assert_eq!(needs_fetch(&cache, &syms(1), REFRESH_TTL, 1_061), syms(1));
+    }
+
+    #[test]
+    fn a_ttl_of_zero_refetches_everything_however_fresh() {
+        let mut cache = Cache::new();
+        cache.insert("S0".into(), q(1_000));
+        // What the Refresh button sends. A user asking for prices now must not be told they
+        // already have them.
+        assert_eq!(needs_fetch(&cache, &syms(1), 0, 1_000), syms(1));
+    }
+
+    #[test]
+    fn every_symbol_comes_back_exactly_once_whatever_the_order() {
+        let got = fetch_many_with(&syms(20), |s| {
+            // Half the symbols fail, the way an unknown ticker does.
+            s.ends_with(|c: char| c.is_ascii_digit() && (c as u8 - b'0').is_multiple_of(2))
+                .then(|| q(1))
+        });
+        assert_eq!(got.len(), 20);
+        let mut names: Vec<&str> = got.iter().map(|(s, _)| s.as_str()).collect();
+        names.sort();
+        names.dedup();
+        assert_eq!(names.len(), 20, "a symbol was fetched twice or dropped");
+        assert_eq!(got.iter().filter(|(_, q)| q.is_none()).count(), 10);
+    }
+
+    #[test]
+    fn the_symbols_are_fetched_in_parallel_but_never_more_than_the_cap() {
+        let inflight = AtomicUsize::new(0);
+        let peak = AtomicUsize::new(0);
+        let got = fetch_many_with(&syms(24), |_| {
+            let n = inflight.fetch_add(1, Ordering::SeqCst) + 1;
+            peak.fetch_max(n, Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(40));
+            inflight.fetch_sub(1, Ordering::SeqCst);
+            Some(q(1))
+        });
+        assert_eq!(got.len(), 24);
+        let peak = peak.load(Ordering::SeqCst);
+        // Serial is the bug this exists to prevent: 24 symbols one at a time is the six second
+        // boot. The cap is the other half, so an outage does not turn into 200 open sockets.
+        assert!(peak > 1, "fetches ran one at a time");
+        assert!(
+            peak <= MAX_PARALLEL,
+            "{peak} in flight, cap is {MAX_PARALLEL}"
+        );
     }
 }

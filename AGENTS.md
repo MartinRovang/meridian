@@ -53,6 +53,25 @@ unrelated to the change.
 exist to reach the network. Their parsing halves are covered in core, and both
 are verified by hand against live data before release.
 
+## Caching quotes
+
+The cache is a `HashMap<String, Quote>` behind a mutex, mirrored to
+`quotes.json` so it survives a restart. Three rules keep it cheap:
+
+- `quotes::needs_fetch` decides what to ask for: anything missing, and anything
+  older than `REFRESH_TTL` (60s). `POST /api/refresh?force=1` passes a ttl of 0,
+  which is what the Refresh button sends.
+- `quotes::fetch_many` runs the requests `MAX_PARALLEL` (8) at a time on scoped
+  threads.
+- `Ctx::refreshing` is held for the length of a refresh, so a second caller
+  waits and then finds everything fresh instead of repeating the work.
+
+Redis was considered and rejected: the working set is one quote per held symbol,
+a few hundred bytes, already shared across requests and already durable. A cache
+server would add a daemon, a network hop and a fallback path to guard that. It
+becomes the right answer only if `meridian-server` ever runs as more than one
+process, and that decision is not made here.
+
 ## Checks before pushing
 
 ```sh

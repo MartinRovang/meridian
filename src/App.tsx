@@ -17,7 +17,7 @@ export function App() {
   const { ready, steps, error, screen, state, boot, load } = useApp()
 
   const retry = async () => {
-    await post('/api/refresh').catch(() => undefined)
+    await post('/api/refresh?force=1').catch(() => undefined)
     await load()
   }
 

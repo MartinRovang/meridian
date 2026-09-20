@@ -38,6 +38,9 @@ type Out = Result<Value, Fail>;
 pub struct Ctx {
     pub cfg: Config,
     pub cache: Arc<Mutex<quotes::Cache>>,
+    /// Held for the length of a refresh. A second caller does not get turned away, it waits and
+    /// then finds every quote fresh, so two windows booting together make one set of requests.
+    pub refreshing: Arc<Mutex<()>>,
 }
 
 /// Equal without leaking where they differ.
@@ -310,7 +313,10 @@ fn delete_holding(ctx: &Ctx, id: &str) -> Out {
 ///
 /// A symbol that fails keeps whatever was cached, so a partial outage costs freshness, not data.
 /// The failures come back by name so the page can say which rows it could not price.
-fn refresh(ctx: &Ctx) -> Out {
+fn refresh(ctx: &Ctx, force: bool) -> Out {
+    // Taken before anything is read, so a second refresh arriving mid-flight waits here rather
+    // than starting its own round of requests against the same symbols.
+    let _flight = ctx.refreshing.lock().unwrap_or_else(|e| e.into_inner());
     let s = load(ctx)?;
     let mut wanted: Vec<String> = s
         .portfolios
@@ -319,14 +325,23 @@ fn refresh(ctx: &Ctx) -> Out {
         .collect();
     wanted.sort();
     wanted.dedup();
+    let ttl = if force { 0 } else { quotes::REFRESH_TTL };
+    let now = quotes::now();
     let mut cache = ctx.cache.lock().expect("cache lock").clone();
+
     let mut failed = Vec::new();
-    for sym in &wanted {
-        match quotes::fetch(sym) {
+    let stale = quotes::needs_fetch(&cache, &wanted, ttl, now);
+    // What was actually asked of Yahoo, not what the portfolio holds. Reporting the holding count
+    // here would claim sixteen requests on a refresh that made none.
+    let mut fetched = 0usize;
+    let cached = wanted.len() - stale.len();
+    for (sym, q) in quotes::fetch_many(&stale) {
+        match q {
             Some(q) => {
-                cache.insert(sym.clone(), q);
+                cache.insert(sym, q);
+                fetched += 1;
             }
-            None => failed.push(sym.clone()),
+            None => failed.push(sym),
         }
     }
     // Which fx pairs are needed is only knowable once the quotes say which currencies are in play.
@@ -341,14 +356,16 @@ fn refresh(ctx: &Ctx) -> Out {
     }
     pairs.sort();
     pairs.dedup();
-    for pair in &pairs {
-        if let Some(q) = quotes::fetch(pair) {
-            cache.insert(pair.clone(), q);
+    for (pair, q) in quotes::fetch_many(&quotes::needs_fetch(&cache, &pairs, ttl, now)) {
+        if let Some(q) = q {
+            cache.insert(pair, q);
         }
     }
+    // Completion order is arbitrary; the page lists these to the user.
+    failed.sort();
     let _ = quotes::save(&ctx.cfg, &cache);
     *ctx.cache.lock().expect("cache lock") = cache;
-    Ok(json!({ "fetched": wanted.len(), "failed": failed }))
+    Ok(json!({ "fetched": fetched, "cached": cached, "failed": failed }))
 }
 
 /// The trade list a rebalance would need. Its own route rather than part of /api/state because
@@ -419,7 +436,8 @@ fn handle(ctx: &Ctx, token: &str, req: Request) {
                 .and_then(|c| c.parse().ok())
                 .unwrap_or(0.0),
         ),
-        ("POST", "/api/refresh") => refresh(ctx),
+        // force=1 is the Refresh button: the user asking for prices now overrides the ttl.
+        ("POST", "/api/refresh") => refresh(ctx, query.contains_key("force")),
         ("POST", "/api/portfolio") => body(&mut req).and_then(|b| create_portfolio(ctx, &b)),
         ("POST", "/api/holding") => body(&mut req).and_then(|b| put_holding(ctx, &b)),
         ("PATCH", p) if tail(p, "/api/portfolio/").is_some() => {
@@ -454,6 +472,7 @@ pub fn serve(cfg: Config, port: u16, token: String) -> std::io::Result<u16> {
         .unwrap_or(port);
     let ctx = Ctx {
         cache: Arc::new(Mutex::new(quotes::load(&cfg))),
+        refreshing: Arc::new(Mutex::new(())),
         cfg,
     };
     std::thread::spawn(move || {
