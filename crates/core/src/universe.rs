@@ -13,6 +13,10 @@
 //! of the filter is only to keep the search out of names whose stale closes would understate
 //! their real volatility.
 
+/// Every listing, whatever the exchange. Three currencies, which the base-currency conversion
+/// already handles: what matters to a Norwegian holder of a Danish share is the krone return.
+pub const ALL: &str = "All Nordic";
+
 pub const OSLO: &str = "Oslo Børs";
 pub const STOCKHOLM: &str = "Stockholm";
 pub const COPENHAGEN: &str = "Copenhagen";
@@ -158,14 +162,18 @@ pub const LISTINGS: &[Listing] = &[
     l("ZEAL.CO", "Zealand Pharma", COPENHAGEN),
 ];
 
-/// The markets a search can be scoped to, in the order the screen offers them.
+/// One exchange each. Kept separate from `SCOPES` because every listing belongs to exactly one
+/// of these, which several things rely on.
 pub const MARKETS: &[&str] = &[OSLO, STOCKHOLM, COPENHAGEN];
 
-/// Every symbol in a market, or in all of them when `market` names none.
+/// What a search can be scoped to, in the order the screen offers them.
+pub const SCOPES: &[&str] = &[ALL, OSLO, STOCKHOLM, COPENHAGEN];
+
+/// Every symbol in a market, or all of them for `ALL` or an empty name.
 pub fn in_market(market: &str) -> Vec<String> {
     LISTINGS
         .iter()
-        .filter(|l| market.is_empty() || l.market == market)
+        .filter(|l| market.is_empty() || market == ALL || l.market == market)
         .map(|l| l.symbol.to_string())
         .collect()
 }
@@ -203,6 +211,15 @@ mod tests {
         let oslo = in_market(OSLO);
         assert!(oslo.iter().all(|s| s.ends_with(".OL")));
         assert_eq!(in_market("").len(), LISTINGS.len());
+        assert_eq!(
+            in_market(ALL).len(),
+            LISTINGS.len(),
+            "every exchange at once"
+        );
+        assert!(
+            SCOPES.contains(&ALL) && MARKETS.iter().all(|m| SCOPES.contains(m)),
+            "the screen offers all of them plus the combined one"
+        );
         let counts: usize = MARKETS.iter().map(|m| in_market(m).len()).sum();
         assert_eq!(
             counts,

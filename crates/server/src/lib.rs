@@ -818,7 +818,7 @@ fn handle(ctx: &Ctx, token: &str, req: Request) {
     let out: Out = match (req.method().as_str(), path.as_str()) {
         ("GET", "/api/state") => state(ctx),
         ("GET", "/api/search") => search(ctx, query.get("q").map(String::as_str).unwrap_or("")),
-        ("GET", "/api/markets") => Ok(json!({ "markets": universe::MARKETS })),
+        ("GET", "/api/markets") => Ok(json!({ "markets": universe::SCOPES })),
         ("GET", "/api/discover") => discover_route(ctx, &query),
         ("GET", "/api/optimize") => optimize_route(
             ctx,

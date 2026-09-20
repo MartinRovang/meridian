@@ -350,6 +350,35 @@ pub fn min_variance(cov: &[Vec<f64>]) -> Vec<f64> {
     w
 }
 
+/// Each holding's share of the portfolio's risk, in percent, summing to 100.
+///
+/// Not the same as its share of the money, and the difference is the point: a holding can be a
+/// fifth of the value and a third of the risk, and no weight column will ever say so.
+pub fn risk_contributions(cov: &[Vec<f64>], w: &[f64]) -> Vec<f64> {
+    let n = w.len();
+    let marginal: Vec<f64> = (0..n)
+        .map(|i| (0..n).map(|j| cov[i][j] * w[j]).sum::<f64>())
+        .collect();
+    let var: f64 = (0..n).map(|i| w[i] * marginal[i]).sum();
+    if var <= 0.0 {
+        return vec![0.0; n];
+    }
+    (0..n).map(|i| w[i] * marginal[i] / var * 100.0).collect()
+}
+
+/// The weighted average of the parts' volatilities over the whole's volatility.
+///
+/// One means diversification bought nothing, which is what holding one thing, or several things
+/// that move as one, gets you. Higher means the parts are cancelling some of each other out.
+pub fn diversification_ratio(cov: &[Vec<f64>], w: &[f64]) -> f64 {
+    let parts: f64 = (0..w.len()).map(|i| w[i] * cov[i][i].max(0.0).sqrt()).sum();
+    let whole = volatility(cov, w) / 100.0;
+    if whole <= 0.0 {
+        return 1.0;
+    }
+    parts / whole
+}
+
 /// One row of the optimizer's proposal.
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct Suggestion {
@@ -359,6 +388,10 @@ pub struct Suggestion {
     /// The target in force today, which is what the suggestion replaces.
     pub target_pct: f64,
     pub suggested_pct: f64,
+    /// Share of the portfolio's risk at the current targets and at the suggested ones, in
+    /// percent. Zero and meaningless when `optimised` is false.
+    pub risk_now_pct: f64,
+    pub risk_pct: f64,
     /// False when the holding has no usable history: its target is carried over untouched and
     /// the screen says why.
     pub optimised: bool,
@@ -378,6 +411,11 @@ pub struct Proposal {
     /// How much of the portfolio the optimizer was allowed to move.
     pub budget_pct: f64,
     pub observations: usize,
+    /// The measured holdings, in the order the correlation matrix uses.
+    pub symbols: Vec<String>,
+    pub correlation: Vec<Vec<f64>>,
+    pub div_current: f64,
+    pub div_suggested: f64,
 }
 
 /// What the weights should be, given what is known about how these holdings move together.
@@ -409,28 +447,44 @@ pub fn suggest(
         .sum();
     let budget = (100.0 - kept).max(0.0);
 
-    let mut current: Vec<f64> = Vec::new();
+    // Current weights in the matrix's own order, renormalised within the measured subset: risk
+    // shares and volatility are both shares of that subset, not of the whole portfolio.
+    let current = normalise(
+        m.symbols
+            .iter()
+            .map(|sym| {
+                p.holdings
+                    .iter()
+                    .find(|h| h.ticker == *sym)
+                    .map_or(0.0, |h| h.target_pct)
+            })
+            .collect(),
+    );
+    let risk_now = risk_contributions(&cov, &current);
+    let risk_next = risk_contributions(&cov, &weights);
+
     let rows: Vec<Suggestion> = p
         .holdings
         .iter()
         .map(|h| match m.symbols.iter().position(|s| *s == h.ticker) {
-            Some(i) => {
-                current.push(h.target_pct);
-                Suggestion {
-                    id: h.id.clone(),
-                    ticker: h.ticker.clone(),
-                    name: h.name.clone(),
-                    target_pct: h.target_pct,
-                    suggested_pct: weights[i] * budget,
-                    optimised: true,
-                }
-            }
+            Some(i) => Suggestion {
+                id: h.id.clone(),
+                ticker: h.ticker.clone(),
+                name: h.name.clone(),
+                target_pct: h.target_pct,
+                suggested_pct: weights[i] * budget,
+                risk_now_pct: risk_now[i],
+                risk_pct: risk_next[i],
+                optimised: true,
+            },
             None => Suggestion {
                 id: h.id.clone(),
                 ticker: h.ticker.clone(),
                 name: h.name.clone(),
                 target_pct: h.target_pct,
                 suggested_pct: h.target_pct,
+                risk_now_pct: 0.0,
+                risk_pct: 0.0,
                 optimised: false,
             },
         })
@@ -441,11 +495,15 @@ pub fn suggest(
         excluded,
         // Renormalised within the subset: comparing a subset at weights summing to 70 against one
         // summing to 100 would report the difference in size as a difference in risk.
-        vol_current: volatility(&cov, &normalise(current)),
+        vol_current: volatility(&cov, &current),
         vol_suggested: volatility(&cov, &weights),
         method: method.to_string(),
         budget_pct: budget,
         observations: m.len(),
+        symbols: m.symbols.clone(),
+        div_current: diversification_ratio(&cov, &current),
+        div_suggested: diversification_ratio(&cov, &weights),
+        correlation: correlation(&cov),
     }
 }
 
@@ -582,6 +640,65 @@ mod tests {
     }
 
     #[test]
+    fn risk_shares_sum_to_a_hundred_and_are_not_the_weights() {
+        // Equal money in two uncorrelated assets, one three times as volatile as the other. The
+        // weights say 50/50 and the risk says nine to one, which is the entire reason this column
+        // exists: a weight column cannot tell you where the risk actually sits.
+        let cov = diag(&[0.01, 0.09]);
+        let rc = risk_contributions(&cov, &[0.5, 0.5]);
+        assert!((rc.iter().sum::<f64>() - 100.0).abs() < 1e-9, "{rc:?}");
+        assert!((rc[0] - 10.0).abs() < 1e-9, "{rc:?}");
+        assert!((rc[1] - 90.0).abs() < 1e-9, "{rc:?}");
+    }
+
+    #[test]
+    fn equal_risk_shares_mean_the_weights_were_not_equal() {
+        // Inverse volatility on uncorrelated assets is the weighting that equalises risk shares.
+        let cov = diag(&[0.01, 0.09]);
+        let w = inverse_vol(&cov);
+        let rc = risk_contributions(&cov, &w);
+        assert!((rc[0] - rc[1]).abs() < 1e-9, "{rc:?} from {w:?}");
+        assert!((w[0] - 0.75).abs() < 1e-9, "three to one by money: {w:?}");
+    }
+
+    #[test]
+    fn at_a_minimum_variance_optimum_risk_share_equals_weight() {
+        // The first-order condition of minimum variance is that every held asset contributes the
+        // same marginal risk, which makes each one's share of the risk exactly its share of the
+        // money. That is why those two columns agree on the screen, and it is also an independent
+        // check on the solver: a weighting that misses the optimum breaks the identity.
+        let cov = vec![
+            vec![0.040, 0.012, 0.004],
+            vec![0.012, 0.025, 0.006],
+            vec![0.004, 0.006, 0.010],
+        ];
+        let w = min_variance(&cov);
+        let rc = risk_contributions(&cov, &w);
+        for i in 0..3 {
+            assert!((rc[i] - w[i] * 100.0).abs() < 1e-3, "{i}: {rc:?} vs {w:?}");
+        }
+        // and it is a property of that optimum, not of the arithmetic: any other weighting breaks it
+        let other = [0.6, 0.2, 0.2];
+        let rc2 = risk_contributions(&cov, &other);
+        assert!(
+            (0..3).any(|i| (rc2[i] - other[i] * 100.0).abs() > 1.0),
+            "{rc2:?}"
+        );
+    }
+
+    #[test]
+    fn diversification_is_one_when_two_holdings_are_the_same_bet() {
+        // Perfectly correlated, so the whole is exactly the sum of its parts and holding both
+        // bought nothing at all.
+        let same = vec![vec![0.04, 0.04], vec![0.04, 0.04]];
+        assert!((diversification_ratio(&same, &[0.5, 0.5]) - 1.0).abs() < 1e-9);
+        // Uncorrelated and equally volatile: the pair is 1/sqrt(2) as volatile as either alone.
+        let apart = diag(&[0.04, 0.04]);
+        let d = diversification_ratio(&apart, &[0.5, 0.5]);
+        assert!((d - 2.0_f64.sqrt()).abs() < 1e-9, "{d}");
+    }
+
+    #[test]
     fn suggested_targets_and_untouched_ones_sum_to_exactly_a_hundred() {
         // NOHIST.OL has no history, so its 40% target is carried over and the optimizer is left
         // 60 points to divide. Rebalance refuses anything that does not sum to 100, so a
@@ -655,6 +772,27 @@ mod tests {
         let out = suggest(&p, "NOK", &h, &HashMap::new(), "minvar");
         assert!(out.vol_suggested < out.vol_current, "{out:?}");
         assert!(out.observations > MIN_OBS);
+
+        // 90% of the money in the wild one means very nearly all of the risk, and the whole job
+        // of the risk column is to be read against the current targets rather than the proposed
+        // ones. Both figures on one row, or there is nothing to compare.
+        let wild = out
+            .rows
+            .iter()
+            .find(|r| r.ticker == "WILD.OL")
+            .expect("wild");
+        assert!(wild.risk_now_pct > 95.0, "{wild:?}");
+        assert!(wild.risk_pct < wild.risk_now_pct, "{wild:?}");
+        let total: f64 = out.rows.iter().map(|r| r.risk_pct).sum();
+        assert!((total - 100.0).abs() < 1e-9, "{total}");
+        // Both fixtures step up and down on the same schedule, so they are one bet at two sizes
+        // and holding them together buys nothing. Exactly one is the right answer, and a ratio
+        // above it here would mean the figure was invented rather than measured.
+        assert!(
+            (out.div_suggested - 1.0).abs() < 1e-9,
+            "{}",
+            out.div_suggested
+        );
     }
 
     #[test]

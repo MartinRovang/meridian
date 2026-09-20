@@ -52,6 +52,8 @@ pub struct Pick {
     pub symbol: String,
     pub name: String,
     pub weight_pct: f64,
+    /// Share of the basket's risk, which is not the same as its share of the money.
+    pub risk_pct: f64,
 }
 
 /// What a basket did over one window.
@@ -84,6 +86,10 @@ pub struct Discovery {
     pub exhaustive: bool,
     pub method: String,
     pub cost_bps: f64,
+    /// Correlation between the picks, in the order they are listed. The question it answers is
+    /// whether the search found five different things or five banks.
+    pub correlation: Vec<Vec<f64>>,
+    pub div_ratio: f64,
     /// Symbols the list carries that have no usable history, so a stale list is visible rather
     /// than silently smaller.
     pub unusable: Vec<String>,
@@ -414,9 +420,10 @@ pub fn search(
     let want: Vec<String> = chosen.iter().map(|i| m.symbols[*i].clone()).collect();
 
     let train_sub = train.pick(&want);
-    let (w, _, _) = weights_for(&train_sub, method);
+    let (w, cov, _) = weights_for(&train_sub, method);
     let test_sub = test.pick(&want);
     let equal = vec![1.0 / want.len() as f64; want.len()];
+    let risk = crate::optimize::risk_contributions(&cov, &w);
 
     Discovery {
         picks: want
@@ -428,6 +435,7 @@ pub fn search(
                     .unwrap_or(symbol)
                     .to_string(),
                 weight_pct: w[i] * 100.0,
+                risk_pct: risk[i],
             })
             .collect(),
         train: walk(&train_sub, &w, REBALANCE_DAYS, cost_bps),
@@ -436,6 +444,8 @@ pub fn search(
         prefiltered: kept.len(),
         combos,
         exhaustive,
+        correlation: crate::optimize::correlation(&cov),
+        div_ratio: crate::optimize::diversification_ratio(&cov, &w),
         ..base
     }
 }

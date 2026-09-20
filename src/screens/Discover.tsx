@@ -1,9 +1,10 @@
 import { useEffect, useState } from 'react'
 import { get } from '../api'
 import { pct, signed } from '../format'
+import { Corr } from '../Corr'
 import { Stat } from '../Stat'
 
-type Pick = { symbol: string; name: string; weight_pct: number }
+type Pick = { symbol: string; name: string; weight_pct: number; risk_pct: number }
 type Outcome = {
   total_pct: number
   vol: number
@@ -24,6 +25,8 @@ type Result = {
   method: string
   cost_bps: number
   unusable: string[]
+  correlation: number[][]
+  div_ratio: number
 }
 
 const METHODS: [string, string][] = [
@@ -179,6 +182,7 @@ function Found({ out }: { out: Result }) {
               <th>Ticker</th>
               <th>Name</th>
               <th className="num">Weight</th>
+              <th className="num">Share of risk</th>
             </tr>
           </thead>
           <tbody>
@@ -187,10 +191,26 @@ function Found({ out }: { out: Result }) {
                 <td>{p.symbol}</td>
                 <td className="text-muted">{p.name}</td>
                 <td className="num">{pct(p.weight_pct)}</td>
+                <td className="num">{pct(p.risk_pct)}</td>
               </tr>
             ))}
           </tbody>
         </table>
+      </section>
+
+      <section className="panel">
+        <div className="panel-head">
+          How the picks move together, diversification {out.div_ratio.toFixed(2)}
+        </div>
+        <Corr symbols={out.picks.map((p) => p.symbol)} matrix={out.correlation} />
+        <p className="text-muted">
+          Red is moving together, blue is moving apart. A basket of five names that all sit above
+          0.8 is one bet in five pieces, and the ratio above says how much holding them together
+          bought: one means nothing at all.
+          {out.method === 'minvar'
+            ? ' Share of risk matches weight exactly here, and will under any minimum-variance result: equalising marginal risk is what the objective solves for. Under maximum Sharpe the two columns come apart.'
+            : ''}
+        </p>
       </section>
 
       {/* The verdict comes before the numbers, because it is the thing most likely to be skipped. */}

@@ -186,3 +186,10 @@ tr.breached td:first-child { box-shadow: inset 2px 0 0 var(--color-accent); }
 .legend-line { display: flex; gap: 20px; font-size: 12px; margin-top: 8px; }
 .legend-line span { display: flex; align-items: center; gap: 7px; }
 .legend-line i { width: 14px; height: 0; border-top: 2px solid currentColor; }
+
+/* The matrix is square and small, so it scrolls sideways rather than shrinking its text to fit. */
+.corr-wrap { overflow-x: auto; }
+.corr { border-collapse: collapse; font-size: 12px; font-variant-numeric: tabular-nums; }
+.corr th { font-weight: 400; color: var(--color-neutral-300); padding: 4px 8px; text-align: right; white-space: nowrap; }
+.corr thead th { text-align: center; }
+.corr td { padding: 4px 8px; text-align: right; min-width: 54px; border-radius: var(--radius-sm); }

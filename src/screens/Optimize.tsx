@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { get, post } from '../api'
 import { pct, signed } from '../format'
 import { SkelScreen } from '../Skeleton'
+import { Corr } from '../Corr'
 import { Stat } from '../Stat'
 import { useApp } from '../store'
 
@@ -11,6 +12,8 @@ type Row = {
   name: string
   target_pct: number
   suggested_pct: number
+  risk_now_pct: number
+  risk_pct: number
   optimised: boolean
 }
 type Proposal = {
@@ -21,6 +24,10 @@ type Proposal = {
   method: string
   budget_pct: number
   observations: number
+  symbols: string[]
+  correlation: number[][]
+  div_current: number
+  div_suggested: number
 }
 
 // A move smaller than this is a rounding artefact, not a trade: without the floor a -0.04pp
@@ -118,7 +125,10 @@ export function Optimize() {
                 tone={plan.vol_suggested < plan.vol_current ? 'up' : 'down'}
               />
               <Stat label="Measured over" value={`${plan.observations} days`} />
-              <Stat label="Weight in play" value={pct(plan.budget_pct)} />
+              <Stat
+                label="Diversification"
+                value={`${plan.div_current.toFixed(2)} to ${plan.div_suggested.toFixed(2)}`}
+              />
             </div>
 
             <section className="panel">
@@ -131,6 +141,8 @@ export function Optimize() {
                     <th className="num">Target now</th>
                     <th className="num">Suggested</th>
                     <th className="num">Change</th>
+                    <th className="num">Risk now</th>
+                    <th className="num">Risk after</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -151,6 +163,14 @@ export function Optimize() {
                         // from having been considered and left alone.
                         <td className="text-muted">no history, kept as is</td>
                       )}
+                      {r.optimised ? (
+                        <>
+                          <td className="num">{pct(r.risk_now_pct)}</td>
+                          <td className="num">{pct(r.risk_pct)}</td>
+                        </>
+                      ) : (
+                        <td className="text-muted" colSpan={2} />
+                      )}
                     </tr>
                   ))}
                 </tbody>
@@ -165,6 +185,20 @@ export function Optimize() {
                   {busy ? 'Writing' : moves ? 'Apply targets and review trades' : 'Already set'}
                 </button>
               </div>
+            </section>
+
+            <section className="panel">
+              <div className="panel-head">How these move together</div>
+              <Corr symbols={plan.symbols} matrix={plan.correlation} />
+              <p className="text-muted">
+                Red is moving together, blue is moving apart. Two holdings at 0.9 are close to one
+                holding at twice the size, whatever the allocation chart shows. The risk columns
+                above say the same thing per holding: a fifth of the money can be a third of the
+                risk.
+                {method === 'minvar'
+                  ? ' Under minimum variance the two right-hand columns always agree, because equalising the marginal risk of every holding is exactly what this objective solves for. The left one, measured on the targets you hold now, is the one with something to say.'
+                  : ''}
+              </p>
             </section>
 
             <p className="text-muted">

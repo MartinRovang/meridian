@@ -163,6 +163,21 @@ Two rules the arithmetic must keep:
   targets renormalised within it. Comparing a subset summing to 70 against one
   summing to 100 reports a difference in size as a difference in risk.
 
+### Diagnostics
+
+`risk_contributions` gives each holding's share of the portfolio's risk, which is
+not its share of the money: on the demo portfolio Equinor is 40% of the value
+and 49.4% of the risk, and no weight column will ever say so.
+`diversification_ratio` is the weighted average of the parts' volatilities over
+the whole's, so one means holding them together bought nothing.
+
+One result looks like a bug and is not: **at a minimum-variance optimum every
+holding's share of risk equals its share of the money exactly.** Equalising
+marginal risk is the first-order condition of that objective, so the identity
+holds by construction. Both screens say so where the columns agree, and there is
+a test asserting it, which doubles as an independent check on the solver: a
+weighting that misses the optimum breaks the identity.
+
 `POST /api/targets` writes `target_pct` and nothing else, all holdings or none.
 Applying an optimizer's proposal must not be able to touch a share count or a
 cost basis, whatever the payload says.
@@ -206,6 +221,12 @@ The result must not depend on which thread finished first, so `par::best_of`
 breaks ties by the lower index. Two identical requests return the same basket to
 the last decimal, which is the difference between a search you can argue with
 and one you cannot.
+
+`All Nordic` searches all three exchanges at once, which is where the search has
+most to work with: 112 usable listings, a diversification ratio of 1.76 against
+Oslo's own, and correlations among the picks between 0.12 and 0.36. Three
+currencies is not a complication, because everything is converted to base
+currency before a single return is computed.
 
 `crates/core/src/universe.rs` is the shipped list: Oslo's main board by
 turnover from a Euronext export, plus Stockholm and Copenhagen large caps by
