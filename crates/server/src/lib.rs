@@ -16,7 +16,7 @@ use serde_json::{json, Value};
 use tiny_http::{Header, Method, Request, Response, Server};
 
 use meridian_core::config::Config;
-use meridian_core::{calc, history, import, quotes, store};
+use meridian_core::{calc, history, import, optimize, quotes, store};
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -408,6 +408,122 @@ fn trades(ctx: &Ctx, pid: &str, cash: f64) -> Out {
     }
 }
 
+/// Daily bars for a set of symbols, plus the fx series they need, fetching only what is stale.
+///
+/// Shared by every screen that thinks in history. Which fx pairs are wanted is only knowable
+/// once the price histories say which currencies are in play, which is why this is one function
+/// and not two.
+fn histories_for(
+    ctx: &Ctx,
+    wanted: &[String],
+    base: &str,
+) -> (
+    HashMap<String, history::Series>,
+    HashMap<String, history::Series>,
+) {
+    let fetch_into = |syms: &[String]| -> HashMap<String, history::Series> {
+        let mut out: HashMap<String, history::Series> = HashMap::new();
+        let mut stale = Vec::new();
+        for sym in syms {
+            match history::load(&ctx.cfg, sym) {
+                Some(series) if history::is_current(&series) => {
+                    out.insert(sym.clone(), series);
+                }
+                _ => stale.push(sym.clone()),
+            }
+        }
+        for (sym, got) in history::fetch_many(&stale) {
+            if let Some(series) = got {
+                let _ = history::save(&ctx.cfg, &sym, &series);
+                out.insert(sym, series);
+            }
+        }
+        out
+    };
+
+    let loaded = fetch_into(wanted);
+    let mut pairs: Vec<String> = loaded
+        .values()
+        .filter_map(|series| quotes::fx_symbol(&series.currency, base))
+        .collect();
+    pairs.sort();
+    pairs.dedup();
+    let fx = fetch_into(&pairs);
+    (loaded, fx)
+}
+
+/// Weights the covariance argues for, over the holdings there is history to measure.
+fn optimize_route(ctx: &Ctx, pid: &str, method: &str) -> Out {
+    let s = load(ctx)?;
+    let p = s
+        .portfolios
+        .iter()
+        .find(|p| p.id == pid)
+        .ok_or_else(|| Fail::new(404, "no such portfolio"))?;
+    let mut wanted: Vec<String> = p.holdings.iter().map(|h| h.ticker.clone()).collect();
+    wanted.sort();
+    wanted.dedup();
+    let (loaded, fx) = histories_for(ctx, &wanted, &s.base_currency);
+    let out = optimize::suggest(p, &s.base_currency, &loaded, &fx, method);
+    serde_json::to_value(&out).map_err(|e| Fail::new(500, e.to_string()))
+}
+
+/// Write target weights, and nothing else.
+///
+/// Deliberately not part of the holding endpoint: applying an optimizer's proposal must not be
+/// able to touch a share count or a cost basis, whatever the payload says.
+fn set_targets(ctx: &Ctx, b: &Value) -> Out {
+    let pid = b.get("portfolio").and_then(|x| x.as_str()).unwrap_or("");
+    let targets = b
+        .get("targets")
+        .and_then(|x| x.as_array())
+        .ok_or_else(|| Fail::new(400, "targets must be an array"))?;
+
+    let mut by_id: HashMap<String, f64> = HashMap::new();
+    for t in targets {
+        let id = t
+            .get("id")
+            .and_then(|x| x.as_str())
+            .ok_or_else(|| Fail::new(400, "every target needs an id"))?;
+        let pct = t
+            .get("pct")
+            .and_then(Value::as_f64)
+            .ok_or_else(|| Fail::new(400, "every target needs a pct"))?;
+        if !(0.0..=100.0).contains(&pct) {
+            return Err(Fail::new(400, "pct must be between 0 and 100"));
+        }
+        by_id.insert(id.to_string(), pct);
+    }
+
+    let mut s = load(ctx)?;
+    let p = s
+        .portfolios
+        .iter_mut()
+        .find(|p| p.id == pid)
+        .ok_or_else(|| Fail::new(404, "no such portfolio"))?;
+
+    // Every holding or none. A partial write would leave targets summing to something arbitrary,
+    // and Rebalance would then refuse to do anything with the portfolio it just changed.
+    if by_id.len() != p.holdings.len() || p.holdings.iter().any(|h| !by_id.contains_key(&h.id)) {
+        return Err(Fail::new(
+            400,
+            "targets must cover every holding exactly once",
+        ));
+    }
+    let total: f64 = by_id.values().sum();
+    if (total - 100.0).abs() > 0.05 {
+        return Err(Fail::new(
+            400,
+            format!("targets sum to {total:.2}%, not 100%"),
+        ));
+    }
+    for h in &mut p.holdings {
+        h.target_pct = by_id[&h.id];
+    }
+    commit(ctx, &s)?;
+    Ok(json!({ "written": by_id.len() }))
+}
+
 /// What today's allocation would have done, day by day.
 ///
 /// Histories are fetched once and kept: daily bars change once a day, so a chart drawn twice in a
@@ -429,47 +545,7 @@ fn history_route(ctx: &Ctx, pid: &str, benchmark: &str) -> Out {
     wanted.sort();
     wanted.dedup();
 
-    let mut loaded: HashMap<String, history::Series> = HashMap::new();
-    let mut stale = Vec::new();
-    for sym in &wanted {
-        match history::load(&ctx.cfg, sym) {
-            Some(series) if history::is_current(&series) => {
-                loaded.insert(sym.clone(), series);
-            }
-            _ => stale.push(sym.clone()),
-        }
-    }
-    for (sym, got) in history::fetch_many(&stale) {
-        if let Some(series) = got {
-            let _ = history::save(&ctx.cfg, &sym, &series);
-            loaded.insert(sym, series);
-        }
-    }
-
-    // Which fx pairs are needed is only knowable once the histories say which currencies are in
-    // play, exactly as with quotes.
-    let mut pairs: Vec<String> = loaded
-        .values()
-        .filter_map(|series| quotes::fx_symbol(&series.currency, &s.base_currency))
-        .collect();
-    pairs.sort();
-    pairs.dedup();
-    let mut fx: HashMap<String, history::Series> = HashMap::new();
-    let mut stale_fx = Vec::new();
-    for pair in &pairs {
-        match history::load(&ctx.cfg, pair) {
-            Some(series) if history::is_current(&series) => {
-                fx.insert(pair.clone(), series);
-            }
-            _ => stale_fx.push(pair.clone()),
-        }
-    }
-    for (pair, got) in history::fetch_many(&stale_fx) {
-        if let Some(series) = got {
-            let _ = history::save(&ctx.cfg, &pair, &series);
-            fx.insert(pair, series);
-        }
-    }
+    let (loaded, fx) = histories_for(ctx, &wanted, &s.base_currency);
 
     let out = calc::allocation_history(p, &s.base_currency, &loaded, &fx);
     if bench.is_empty() {
@@ -704,6 +780,11 @@ fn handle(ctx: &Ctx, token: &str, req: Request) {
     let out: Out = match (req.method().as_str(), path.as_str()) {
         ("GET", "/api/state") => state(ctx),
         ("GET", "/api/search") => search(ctx, query.get("q").map(String::as_str).unwrap_or("")),
+        ("GET", "/api/optimize") => optimize_route(
+            ctx,
+            query.get("portfolio").map(String::as_str).unwrap_or(""),
+            query.get("method").map(String::as_str).unwrap_or("minvar"),
+        ),
         ("GET", "/api/history") => history_route(
             ctx,
             query.get("portfolio").map(String::as_str).unwrap_or(""),
@@ -721,6 +802,7 @@ fn handle(ctx: &Ctx, token: &str, req: Request) {
         ("POST", "/api/refresh") => refresh(ctx, query.contains_key("force")),
         ("POST", "/api/portfolio") => body(&mut req).and_then(|b| create_portfolio(ctx, &b)),
         ("POST", "/api/holding") => body(&mut req).and_then(|b| put_holding(ctx, &b)),
+        ("POST", "/api/targets") => body(&mut req).and_then(|b| set_targets(ctx, &b)),
         ("POST", "/api/import/preview") => {
             let pid = query.get("portfolio").cloned().unwrap_or_default();
             raw_body(&mut req).and_then(|f| import_preview(ctx, &pid, &f))
@@ -947,6 +1029,87 @@ mod tests {
                 .expect("arr")
                 .len(),
             1
+        );
+    }
+
+    /// Two holdings, so a partial write has something to be partial about.
+    fn with_two_holdings(port: u16, t: &str) -> (String, String, String) {
+        let pid = with_portfolio(port, t);
+        let add = |ticker: &str, target: f64| {
+            json!({
+                "portfolio_id": pid, "ticker": ticker, "name": ticker, "cls": "Equity",
+                "shares": 10.0, "cost_basis": 1000.0, "cost_currency": "NOK",
+                "target_pct": target})
+        };
+        let (_, a) = call(port, "POST", "/api/holding", t, add("EQNR.OL", 50.0));
+        let (_, b) = call(port, "POST", "/api/holding", t, add("AAPL", 50.0));
+        (
+            pid,
+            a["id"].as_str().expect("id").to_string(),
+            b["id"].as_str().expect("id").to_string(),
+        )
+    }
+
+    #[test]
+    fn targets_are_written_when_they_cover_everything_and_sum_to_a_hundred() {
+        let (_d, port, t) = up();
+        let (pid, a, b) = with_two_holdings(port, &t);
+        let (code, _) = call(
+            port,
+            "POST",
+            "/api/targets",
+            &t,
+            json!({"portfolio": pid, "targets": [
+                {"id": a, "pct": 30.0}, {"id": b, "pct": 70.0}]}),
+        );
+        assert_eq!(code, 200);
+        let (_, s) = call(port, "GET", "/api/state", &t, Value::Null);
+        let hs = s["portfolios"][0]["holdings"].as_array().expect("arr");
+        let by = |id: &str| -> f64 {
+            hs.iter().find(|h| h["id"] == id).expect("holding")["target_pct"]
+                .as_f64()
+                .expect("pct")
+        };
+        assert_eq!(by(&a), 30.0);
+        assert_eq!(by(&b), 70.0);
+    }
+
+    #[test]
+    fn a_partial_target_write_is_refused_rather_than_half_applied() {
+        // Writing one of two would leave the portfolio summing to something arbitrary, and
+        // Rebalance would then refuse to act on the portfolio this endpoint just changed.
+        let (_d, port, t) = up();
+        let (pid, a, _b) = with_two_holdings(port, &t);
+        let (code, err) = call(
+            port,
+            "POST",
+            "/api/targets",
+            &t,
+            json!({"portfolio": pid, "targets": [{"id": a, "pct": 100.0}]}),
+        );
+        assert_eq!(code, 400, "{err}");
+        let (_, s) = call(port, "GET", "/api/state", &t, Value::Null);
+        for h in s["portfolios"][0]["holdings"].as_array().expect("arr") {
+            assert_eq!(h["target_pct"], 50.0, "nothing was written");
+        }
+    }
+
+    #[test]
+    fn targets_that_do_not_sum_to_a_hundred_are_refused() {
+        let (_d, port, t) = up();
+        let (pid, a, b) = with_two_holdings(port, &t);
+        let (code, err) = call(
+            port,
+            "POST",
+            "/api/targets",
+            &t,
+            json!({"portfolio": pid, "targets": [
+                {"id": a, "pct": 30.0}, {"id": b, "pct": 30.0}]}),
+        );
+        assert_eq!(code, 400);
+        assert!(
+            err["error"].as_str().expect("error").contains("60"),
+            "the message should say what they did sum to: {err}"
         );
     }
 

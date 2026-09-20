@@ -316,6 +316,105 @@ pub fn min_variance(cov: &[Vec<f64>]) -> Vec<f64> {
     w
 }
 
+/// One row of the optimizer's proposal.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct Suggestion {
+    pub id: String,
+    pub ticker: String,
+    pub name: String,
+    /// The target in force today, which is what the suggestion replaces.
+    pub target_pct: f64,
+    pub suggested_pct: f64,
+    /// False when the holding has no usable history: its target is carried over untouched and
+    /// the screen says why.
+    pub optimised: bool,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct Proposal {
+    pub rows: Vec<Suggestion>,
+    /// Named, never silently dropped.
+    pub excluded: Vec<String>,
+    /// Annualised volatility over the optimised holdings at their current targets, and at the
+    /// suggested ones. Both measured over the same subset, or the comparison would be between
+    /// two different portfolios.
+    pub vol_current: f64,
+    pub vol_suggested: f64,
+    pub method: String,
+    /// How much of the portfolio the optimizer was allowed to move.
+    pub budget_pct: f64,
+    pub observations: usize,
+}
+
+/// What the weights should be, given what is known about how these holdings move together.
+///
+/// Holdings with no usable history keep their current target untouched, and the optimised ones
+/// are scaled to fill exactly what remains of 100. Rebalance refuses targets that do not sum to
+/// 100, and a suggestion that cannot be applied is not a suggestion.
+pub fn suggest(
+    p: &crate::types::Portfolio,
+    base: &str,
+    histories: &HashMap<String, Series>,
+    fx: &HashMap<String, Series>,
+    method: &str,
+) -> Proposal {
+    let want: Vec<String> = p.holdings.iter().map(|h| h.ticker.clone()).collect();
+    let (m, excluded) = build(&want, base, histories, fx);
+    let cov = covariance(&m);
+    let weights = match method {
+        "invvol" => inverse_vol(&cov),
+        _ => min_variance(&cov),
+    };
+
+    // What the optimizer may not touch: everything it could not measure.
+    let kept: f64 = p
+        .holdings
+        .iter()
+        .filter(|h| !m.symbols.contains(&h.ticker))
+        .map(|h| h.target_pct)
+        .sum();
+    let budget = (100.0 - kept).max(0.0);
+
+    let mut current: Vec<f64> = Vec::new();
+    let rows: Vec<Suggestion> = p
+        .holdings
+        .iter()
+        .map(|h| match m.symbols.iter().position(|s| *s == h.ticker) {
+            Some(i) => {
+                current.push(h.target_pct);
+                Suggestion {
+                    id: h.id.clone(),
+                    ticker: h.ticker.clone(),
+                    name: h.name.clone(),
+                    target_pct: h.target_pct,
+                    suggested_pct: weights[i] * budget,
+                    optimised: true,
+                }
+            }
+            None => Suggestion {
+                id: h.id.clone(),
+                ticker: h.ticker.clone(),
+                name: h.name.clone(),
+                target_pct: h.target_pct,
+                suggested_pct: h.target_pct,
+                optimised: false,
+            },
+        })
+        .collect();
+
+    Proposal {
+        rows,
+        excluded,
+        // Renormalised within the subset: comparing a subset at weights summing to 70 against one
+        // summing to 100 would report the difference in size as a difference in risk.
+        vol_current: volatility(&cov, &normalise(current)),
+        vol_suggested: volatility(&cov, &weights),
+        method: method.to_string(),
+        budget_pct: budget,
+        observations: m.len(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -417,6 +516,111 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    fn holding(ticker: &str, target: f64) -> crate::types::Holding {
+        crate::types::Holding {
+            id: format!("h_{ticker}"),
+            ticker: ticker.to_string(),
+            name: ticker.to_string(),
+            cls: "Equity".into(),
+            shares: 1.0,
+            cost_basis: 100.0,
+            cost_currency: "NOK".into(),
+            target_pct: target,
+        }
+    }
+
+    /// A price path with a known volatility: a fixed daily move whose sign alternates.
+    fn wobble(step: f64, n: usize) -> Series {
+        let mut close = 100.0;
+        let closes: Vec<f64> = (0..n)
+            .map(|i| {
+                close *= if i % 2 == 0 {
+                    1.0 + step
+                } else {
+                    1.0 / (1.0 + step)
+                };
+                close
+            })
+            .collect();
+        series("NOK", &closes)
+    }
+
+    #[test]
+    fn suggested_targets_and_untouched_ones_sum_to_exactly_a_hundred() {
+        // NOHIST.OL has no history, so its 40% target is carried over and the optimizer is left
+        // 60 points to divide. Rebalance refuses anything that does not sum to 100, so a
+        // suggestion that breaks this is a suggestion the user cannot apply.
+        let mut h = HashMap::new();
+        h.insert("CALM.OL".to_string(), wobble(0.005, 400));
+        h.insert("WILD.OL".to_string(), wobble(0.03, 400));
+        let p = crate::types::Portfolio {
+            id: "p1".into(),
+            name: "P".into(),
+            owner: String::new(),
+            band_pct: 3.0,
+            holdings: vec![
+                holding("CALM.OL", 30.0),
+                holding("WILD.OL", 30.0),
+                holding("NOHIST.OL", 40.0),
+            ],
+        };
+        let out = suggest(&p, "NOK", &h, &HashMap::new(), "minvar");
+        assert_eq!(out.excluded, vec!["NOHIST.OL".to_string()]);
+        assert!((out.budget_pct - 60.0).abs() < 1e-9);
+        let total: f64 = out.rows.iter().map(|r| r.suggested_pct).sum();
+        assert!((total - 100.0).abs() < 1e-9, "{total}");
+        let untouched = out.rows.iter().find(|r| !r.optimised).expect("the row");
+        assert!((untouched.suggested_pct - 40.0).abs() < 1e-9);
+        // and the calm one must get the larger share of the budget
+        let calm = out
+            .rows
+            .iter()
+            .find(|r| r.ticker == "CALM.OL")
+            .expect("calm");
+        let wild = out
+            .rows
+            .iter()
+            .find(|r| r.ticker == "WILD.OL")
+            .expect("wild");
+        assert!(calm.suggested_pct > wild.suggested_pct, "{calm:?} {wild:?}");
+
+        // The two measured holdings carry targets of 30 and 30, which is a half-and-half split of
+        // the part that was measured. Reported volatility must be that split's, not the figure
+        // you get by feeding weights of 30.0 and 30.0 into a formula expecting fractions.
+        let (m, _) = build(
+            &["CALM.OL".to_string(), "WILD.OL".to_string()],
+            "NOK",
+            &h,
+            &HashMap::new(),
+        );
+        let half = volatility(&covariance(&m), &[0.5, 0.5]);
+        assert!(
+            (out.vol_current - half).abs() < 1e-9,
+            "{} vs {half}",
+            out.vol_current
+        );
+    }
+
+    #[test]
+    fn the_suggestion_is_less_volatile_than_what_it_replaces() {
+        // The whole claim of the screen in one assertion. Measured over the same subset at both
+        // sets of weights, since comparing a subset against the whole portfolio would report a
+        // difference in size as a difference in risk.
+        let mut h = HashMap::new();
+        h.insert("CALM.OL".to_string(), wobble(0.005, 400));
+        h.insert("WILD.OL".to_string(), wobble(0.03, 400));
+        let p = crate::types::Portfolio {
+            id: "p1".into(),
+            name: "P".into(),
+            owner: String::new(),
+            band_pct: 3.0,
+            holdings: vec![holding("CALM.OL", 10.0), holding("WILD.OL", 90.0)],
+        };
+        let out = suggest(&p, "NOK", &h, &HashMap::new(), "minvar");
+        assert!(out.vol_suggested < out.vol_current, "{out:?}");
+        assert!(out.observations > MIN_OBS);
     }
 
     #[test]

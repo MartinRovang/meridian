@@ -139,6 +139,34 @@ overlap.
 The screen says it charges no fees, spreads or tax, because it does not: a real
 account that merely keeps pace with an index has in fact fallen behind it.
 
+## Optimizing weights
+
+`crates/core/src/optimize.rs` holds the covariance of daily returns in base
+currency and the two long-only weightings that follow from it: inverse
+volatility, and minimum variance solved by projected gradient descent onto the
+simplex. The closed form is not used, because it wants short positions this app
+cannot hold.
+
+Neither objective uses an expected return. That is not an omission. Covariance
+is estimated far more reliably than mean return, and an optimiser fed five years
+of measured returns concentrates the portfolio into whatever happened to go up.
+The screen says so where the numbers are.
+
+Two rules the arithmetic must keep:
+
+- **Targets sum to 100.** Holdings with under a year of shared history are
+  excluded and named, their current target is carried over untouched, and the
+  optimised weights are scaled to fill exactly what remains. Rebalance refuses
+  targets that do not sum to 100, so a suggestion that breaks this is a
+  suggestion the user cannot apply.
+- **Volatility before and after is measured over the same subset**, with current
+  targets renormalised within it. Comparing a subset summing to 70 against one
+  summing to 100 reports a difference in size as a difference in risk.
+
+`POST /api/targets` writes `target_pct` and nothing else, all holdings or none.
+Applying an optimizer's proposal must not be able to touch a share count or a
+cost basis, whatever the payload says.
+
 ## Caching quotes
 
 The cache is a `HashMap<String, Quote>` behind a mutex, mirrored to

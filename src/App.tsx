@@ -8,6 +8,7 @@ import { Dashboard } from './screens/Dashboard'
 import { Rebalance } from './screens/Rebalance'
 import { Stress } from './screens/Stress'
 import { Backtest } from './screens/Backtest'
+import { Optimize } from './screens/Optimize'
 import { useApp } from './store'
 
 const TITLES: Record<string, [string, string]> = {
@@ -17,6 +18,7 @@ const TITLES: Record<string, [string, string]> = {
   rebalance: ['Act', 'Rebalance proposal'],
   stress: ['Examine', 'Stress test'],
   backtest: ['Examine', 'Backtest'],
+  optimize: ['Act', 'Optimize weights'],
 }
 
 export function App() {
@@ -77,6 +79,8 @@ export function App() {
           <Stress />
         ) : screen === 'backtest' ? (
           <Backtest />
+        ) : screen === 'optimize' ? (
+          <Optimize />
         ) : (
           <p className="text-muted">{title} is not built yet.</p>
         )}
