@@ -169,6 +169,117 @@ pub fn view_portfolio(p: &Portfolio, base: &str, cache: &Cache) -> PortfolioView
     }
 }
 
+/// One row of the rebalance table.
+#[derive(Clone, Debug, Serialize)]
+pub struct DriftRow {
+    pub id: String,
+    pub ticker: String,
+    pub name: String,
+    pub target_pct: f64,
+    pub actual_pct: f64,
+    /// Actual minus target, in percentage points. Positive is overweight.
+    pub drift_pct: f64,
+    pub breached: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Side {
+    Buy,
+    Sell,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct Trade {
+    pub id: String,
+    pub ticker: String,
+    pub name: String,
+    pub side: Side,
+    /// Fractional. Rounding to whole shares is the broker's problem and the user's judgement.
+    pub shares: f64,
+    /// In base currency, always positive.
+    pub amount: f64,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum RebalanceError {
+    #[error("target weights sum to {0:.1}%, not 100%")]
+    TargetsDoNotSum(f64),
+    #[error("no holding has a usable price")]
+    NothingPriced,
+}
+
+/// Trades smaller than this in base currency are not worth the commission.
+const MIN_TRADE: f64 = 1.0;
+/// How far the sum of targets may be from 100 before rebalancing refuses.
+const TARGET_TOLERANCE: f64 = 0.05;
+
+/// How far each holding has drifted from its target, and whether that breaches the band.
+///
+/// Unpriced holdings are skipped. Including one would report it as 100 points underweight,
+/// which is a statement about a missing quote dressed up as a statement about the portfolio.
+pub fn drift(v: &PortfolioView) -> Vec<DriftRow> {
+    v.holdings
+        .iter()
+        .filter(|h| h.priced)
+        .map(|h| {
+            let drift_pct = h.weight_pct - h.target_pct;
+            DriftRow {
+                id: h.id.clone(),
+                ticker: h.ticker.clone(),
+                name: h.name.clone(),
+                target_pct: h.target_pct,
+                actual_pct: h.weight_pct,
+                drift_pct,
+                breached: drift_pct.abs() > v.band_pct,
+            }
+        })
+        .collect()
+}
+
+/// What to buy and sell to land on target.
+///
+/// With `cash` greater than zero the portfolio is rebalanced against its value PLUS that cash and
+/// only buys are returned, which is how you deploy new money without selling anything.
+///
+/// ponytail: proportional, no tax lots, no wash-sale rules, no whole-share rounding, no
+/// commission model. Those belong with a broker integration, not with typed-in positions.
+pub fn trades(v: &PortfolioView, cash: f64) -> Result<Vec<Trade>, RebalanceError> {
+    let priced: Vec<&HoldingView> = v.holdings.iter().filter(|h| h.priced).collect();
+    if priced.is_empty() || v.value <= 0.0 {
+        return Err(RebalanceError::NothingPriced);
+    }
+    let sum: f64 = priced.iter().map(|h| h.target_pct).sum();
+    if (sum - 100.0).abs() > TARGET_TOLERANCE {
+        return Err(RebalanceError::TargetsDoNotSum(sum));
+    }
+    let pot = v.value + cash.max(0.0);
+    let mut out = Vec::new();
+    for h in priced {
+        let want = pot * h.target_pct / 100.0;
+        let delta = want - h.value;
+        if cash > 0.0 && delta <= 0.0 {
+            continue; // cash mode never sells
+        }
+        if delta.abs() < MIN_TRADE || h.shares <= 0.0 {
+            continue;
+        }
+        // h.price is in the holding's own currency while h.value is in base; their ratio is the
+        // base-currency price per share, which avoids a second fx lookup and cannot disagree
+        // with the value the rest of the screen shows.
+        let per_share_base = h.value / h.shares;
+        out.push(Trade {
+            id: h.id.clone(),
+            ticker: h.ticker.clone(),
+            name: h.name.clone(),
+            side: if delta > 0.0 { Side::Buy } else { Side::Sell },
+            shares: (delta / per_share_base).abs(),
+            amount: delta.abs(),
+        });
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -341,6 +452,113 @@ mod tests {
         );
         let sum: f64 = v.by_class.iter().map(|s| s.pct).sum();
         assert!((sum - 100.0).abs() < 1e-9);
+    }
+
+    /// A portfolio that is 2700 NOK and 1800 NOK by value, so exactly 60/40.
+    fn sixty_forty(target_a: f64, target_b: f64, band: f64) -> PortfolioView {
+        let p = portfolio(
+            band,
+            vec![
+                holding("h1", "EQNR.OL", 10.0, 0.0, "NOK", target_a),
+                holding("h2", "AAPL", 0.9, 0.0, "NOK", target_b),
+            ],
+        );
+        view_portfolio(&p, "NOK", &cache())
+    }
+
+    #[test]
+    fn drift_is_actual_minus_target_in_percentage_points() {
+        let d = drift(&sixty_forty(50.0, 50.0, 3.0));
+        assert_eq!(d.len(), 2);
+        assert!((d[0].actual_pct - 60.0).abs() < 1e-9);
+        assert!((d[0].drift_pct - 10.0).abs() < 1e-9);
+        assert!((d[1].drift_pct + 10.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_drift_inside_the_band_is_not_a_breach() {
+        let d = drift(&sixty_forty(58.0, 42.0, 3.0));
+        assert!(!d[0].breached, "2 points of drift inside a 3 point band");
+    }
+
+    #[test]
+    fn a_drift_outside_the_band_is_a_breach_on_both_sides() {
+        let d = drift(&sixty_forty(50.0, 50.0, 3.0));
+        assert!(d[0].breached, "overweight breaches");
+        assert!(d[1].breached, "underweight breaches too");
+    }
+
+    #[test]
+    fn drift_skips_unpriced_rows_rather_than_calling_them_a_hundred_percent_underweight() {
+        let p = portfolio(
+            3.0,
+            vec![
+                holding("h1", "EQNR.OL", 10.0, 0.0, "NOK", 50.0),
+                holding("h2", "NOPE.OL", 10.0, 0.0, "NOK", 50.0),
+            ],
+        );
+        let d = drift(&view_portfolio(&p, "NOK", &cache()));
+        assert_eq!(d.len(), 1, "an unknown price is not a drift signal");
+    }
+
+    #[test]
+    fn trades_move_each_holding_onto_its_target() {
+        let t = trades(&sixty_forty(50.0, 50.0, 3.0), 0.0).expect("targets sum to 100");
+        let sell = t.iter().find(|t| t.ticker == "EQNR.OL").expect("a sell");
+        assert_eq!(sell.side, Side::Sell);
+        assert!(
+            (sell.amount - 450.0).abs() < 1e-6,
+            "4500 total, target 2250, held 2700"
+        );
+        assert!((sell.shares - 450.0 / 270.0).abs() < 1e-6);
+        let buy = t.iter().find(|t| t.ticker == "AAPL").expect("a buy");
+        assert_eq!(buy.side, Side::Buy);
+        assert!((buy.amount - 450.0).abs() < 1e-6);
+        assert!(
+            (buy.shares - 450.0 / 2000.0).abs() < 1e-6,
+            "priced per share in NOK, not USD"
+        );
+    }
+
+    #[test]
+    fn cash_to_deploy_produces_buys_only() {
+        let t = trades(&sixty_forty(50.0, 50.0, 3.0), 1000.0).expect("targets sum to 100");
+        assert!(!t.is_empty());
+        assert!(
+            t.iter().all(|t| t.side == Side::Buy),
+            "cash mode never sells: {t:?}"
+        );
+    }
+
+    #[test]
+    fn cash_to_deploy_spends_no_more_than_the_cash() {
+        let t = trades(&sixty_forty(50.0, 50.0, 3.0), 1000.0).expect("targets sum to 100");
+        let spent: f64 = t.iter().map(|t| t.amount).sum();
+        assert!(spent <= 1000.0 + 1e-6, "spent {spent} of 1000");
+    }
+
+    #[test]
+    fn targets_that_do_not_sum_to_a_hundred_refuse_to_produce_trades() {
+        match trades(&sixty_forty(50.0, 40.0, 3.0), 0.0) {
+            Err(RebalanceError::TargetsDoNotSum(got)) => assert!((got - 90.0).abs() < 1e-9),
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_portfolio_with_nothing_priced_refuses_rather_than_dividing_by_zero() {
+        let p = portfolio(3.0, vec![holding("h1", "NOPE.OL", 10.0, 0.0, "NOK", 100.0)]);
+        let v = view_portfolio(&p, "NOK", &cache());
+        assert!(matches!(
+            trades(&v, 0.0),
+            Err(RebalanceError::NothingPriced)
+        ));
+    }
+
+    #[test]
+    fn a_holding_already_on_target_generates_no_trade() {
+        let t = trades(&sixty_forty(60.0, 40.0, 3.0), 0.0).expect("targets sum to 100");
+        assert!(t.is_empty(), "nothing to do, got {t:?}");
     }
 
     #[test]
