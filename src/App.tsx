@@ -6,6 +6,7 @@ import { Analytics } from './screens/Analytics'
 import { Builder } from './screens/Builder'
 import { Dashboard } from './screens/Dashboard'
 import { Rebalance } from './screens/Rebalance'
+import { Stress } from './screens/Stress'
 import { useApp } from './store'
 
 const TITLES: Record<string, [string, string]> = {
@@ -13,6 +14,7 @@ const TITLES: Record<string, [string, string]> = {
   analytics: ['Examine', 'Analytics'],
   builder: ['Construct', 'Portfolio builder'],
   rebalance: ['Act', 'Rebalance proposal'],
+  stress: ['Examine', 'Stress test'],
 }
 
 export function App() {
@@ -69,6 +71,8 @@ export function App() {
           <Builder />
         ) : screen === 'rebalance' ? (
           <Rebalance />
+        ) : screen === 'stress' ? (
+          <Stress />
         ) : (
           <p className="text-muted">{title} is not built yet.</p>
         )}

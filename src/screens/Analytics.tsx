@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { get } from '../api'
 import { pct, signed } from '../format'
 import { SkelScreen } from '../Skeleton'
+import { Stat } from '../Stat'
 import { useApp } from '../store'
 import { annualised, drawdown, volatility } from '../stats'
 import { Line, type Point } from './Line'
@@ -79,15 +80,6 @@ export function Analytics() {
           covers the rest of the portfolio, not all of it.
         </p>
       ) : null}
-    </div>
-  )
-}
-
-function Stat({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="panel stat-cell">
-      <div className="text-muted">{label}</div>
-      <div className="stat-value">{value}</div>
     </div>
   )
 }

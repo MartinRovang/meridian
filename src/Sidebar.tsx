@@ -10,7 +10,7 @@ const NAV: [string, string, string, boolean][] = [
   ['bonds', 'Fixed income', 'ph-bank', false],
   ['energy', 'Energy & shipping', 'ph-boat', false],
   ['rebalance', 'Rebalance', 'ph-scales', true],
-  ['stress', 'Stress test', 'ph-warning-diamond', false],
+  ['stress', 'Stress test', 'ph-warning-diamond', true],
   ['backtest', 'Backtest', 'ph-clock-counter-clockwise', false],
   ['alerts', 'Alerts', 'ph-bell', false],
   ['rules', 'Rules', 'ph-funnel', false],

@@ -98,6 +98,29 @@ The statistics live in `src/stats.ts` with their own tests, because they are
 money figures computed in TypeScript and the screen around them is not
 testable without a browser.
 
+## The Stress screen
+
+Two panels, both arithmetic over numbers the app already has, and neither is a
+risk model.
+
+*What if* multiplies: a uniform fall applied to every holding, and a fall in
+every currency other than the base one applied to what is held abroad. The two
+compound rather than adding up. There are no betas: estimating each holding's
+sensitivity to "the market" from five years of prices gives a number to two
+decimals that is mostly noise, and it would obscure the honest part of the
+screen, which is that the user chose the shock.
+
+*Worst it has been* reports the worst move across any window of 1, 5, 21 and 63
+trading days in the same series Analytics draws, with the days it ran between.
+It carries Analytics' caveat, because it is the same series: today's holdings
+priced back through time, not a record of what the portfolio held.
+
+`src/stress.ts` computes money in TypeScript, which "All money math lives in
+Rust" otherwise forbids. The exception is the same one `src/stats.ts` takes: a
+what-if the user retypes has no business making a request per keystroke. It
+buys the exception the same way, with its own tests, including one proving an
+unpriced holding is named rather than shocked as though it were worth nothing.
+
 ## Caching quotes
 
 The cache is a `HashMap<String, Quote>` behind a mutex, mirrored to

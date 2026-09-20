@@ -171,3 +171,9 @@ tr.breached td:first-child { box-shadow: inset 2px 0 0 var(--color-accent); }
   font-size: 12px; color: var(--color-neutral-300); max-width: 68ch;
   border-left: 2px solid var(--color-accent); padding-left: 12px; margin: 0;
 }
+
+/* ponytail: the inputs are number fields, not sliders. A slider needs a range nobody can justify
+   (why does the worst case stop at 50%?) and cannot be typed into. */
+.shock-inputs { display: flex; flex-wrap: wrap; gap: var(--space-3) 24px; margin-bottom: var(--space-3); }
+.shock-inputs label { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+.shock-inputs .input { width: 84px; text-align: right; }
