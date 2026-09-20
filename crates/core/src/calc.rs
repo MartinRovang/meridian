@@ -1,10 +1,11 @@
 //! Every number the user sees. Nothing here touches the network or the disk, so it is all
 //! directly testable, and it is the only place portfolio arithmetic is allowed to live.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use serde::Serialize;
 
+use crate::history::Series;
 use crate::quotes::{fx_symbol, Cache};
 use crate::types::{Holding, Portfolio, Quote};
 
@@ -305,6 +306,144 @@ pub fn trades(v: &PortfolioView, cash: f64) -> Result<Vec<Trade>, RebalanceError
         });
     }
     Ok(out)
+}
+
+/// One day of the allocation's history, in base currency.
+#[derive(Clone, Debug, Serialize, PartialEq)]
+pub struct Point {
+    pub day: String,
+    /// Indexed to 100 on the first day, because the absolute figure would be a lie: it is today's
+    /// share count valued at an old price, not what the portfolio was actually worth back then.
+    pub index: f64,
+}
+
+/// What today's allocation would have done.
+///
+/// NOT the portfolio's past performance. Meridian stores no transactions, so it cannot know what
+/// was held last year; every point here values TODAY'S share count at that day's prices. The
+/// screen has to say so, because the two look identical on a chart and only one of them is true.
+#[derive(Clone, Debug, Serialize, PartialEq, Default)]
+pub struct AllocationHistory {
+    pub points: Vec<Point>,
+    /// Holdings left out because nothing is known about their past, and the fx pairs that were
+    /// missing. Their weight is not redistributed: the chart covers less than the portfolio, and
+    /// the screen says which part.
+    pub missing: Vec<String>,
+}
+
+/// A symbol's values by day, ready for a lookup at any date.
+type ByDay = BTreeMap<String, f64>;
+
+/// One holding reduced to what the chart needs: how many, at what price, at what rate. The rate is
+/// None when the holding is already in base currency and no conversion applies.
+type Leg = (f64, ByDay, Option<ByDay>);
+
+/// The last value known on or before `day`.
+///
+/// Forward fill, because exchanges keep different holidays: Oslo is shut on 17 May while New York
+/// is open, and a portfolio holding both must not show a hole or a drop on that day.
+fn at(series: &ByDay, day: &str) -> Option<f64> {
+    series
+        .range(..=day.to_string())
+        .next_back()
+        .map(|(_, v)| *v)
+}
+
+/// Build the index for a set of holdings, given their histories and the fx histories they need.
+///
+/// `histories` and `fx` are keyed by symbol. A holding with no history is dropped and named; a
+/// holding whose currency needs a rate nobody has is dropped and named. Nothing is ever valued at
+/// zero and nothing is silently assumed to be worth its own currency.
+pub fn allocation_history(
+    p: &Portfolio,
+    base: &str,
+    histories: &HashMap<String, Series>,
+    fx: &HashMap<String, Series>,
+) -> AllocationHistory {
+    let mut missing = Vec::new();
+    let mut legs: Vec<Leg> = Vec::new();
+
+    for h in &p.holdings {
+        let Some(series) = histories.get(&h.ticker) else {
+            missing.push(h.ticker.clone());
+            continue;
+        };
+        let rates = match fx_symbol(&series.currency, base) {
+            None => None, // already in base currency
+            Some(pair) => match fx.get(&pair) {
+                Some(s) => Some(s.bars.iter().map(|b| (b.day.clone(), b.close)).collect()),
+                None => {
+                    missing.push(h.ticker.clone());
+                    continue;
+                }
+            },
+        };
+        let closes: ByDay = series
+            .bars
+            .iter()
+            .map(|b| (b.day.clone(), b.close))
+            .collect();
+        if closes.is_empty() || h.shares <= 0.0 {
+            missing.push(h.ticker.clone());
+            continue;
+        }
+        legs.push((h.shares, closes, rates));
+    }
+
+    if legs.is_empty() {
+        return AllocationHistory {
+            points: Vec::new(),
+            missing,
+        };
+    }
+
+    // The chart starts where every leg has data. Starting earlier would mean a line that gains a
+    // holding partway through, which reads as a jump in value that never happened.
+    let start = legs
+        .iter()
+        .filter_map(|(_, c, _)| c.keys().next().cloned())
+        .max()
+        .unwrap_or_default();
+    let mut days: Vec<&String> = legs
+        .iter()
+        .flat_map(|(_, c, _)| c.keys())
+        .filter(|d| **d >= start)
+        .collect();
+    days.sort();
+    days.dedup();
+
+    let value_on = |day: &str| -> Option<f64> {
+        let mut total = 0.0;
+        for (shares, closes, rates) in &legs {
+            let close = at(closes, day)?;
+            let rate = match rates {
+                None => 1.0,
+                Some(r) => at(r, day)?,
+            };
+            total += shares * close * rate;
+        }
+        Some(total)
+    };
+
+    // The first day with a value for every leg is the base of the index. An fx series can start
+    // later than a price series, so this is not always the first day in the list.
+    let Some(base_value) = days.iter().find_map(|d| value_on(d)).filter(|v| *v > 0.0) else {
+        return AllocationHistory {
+            points: Vec::new(),
+            missing,
+        };
+    };
+
+    let points = days
+        .iter()
+        .filter_map(|d| {
+            Some(Point {
+                day: (*d).clone(),
+                index: value_on(d)? / base_value * 100.0,
+            })
+        })
+        .collect();
+    AllocationHistory { points, missing }
 }
 
 #[cfg(test)]
@@ -628,5 +767,197 @@ mod tests {
         );
         let spend: f64 = t.iter().map(|t| t.amount).sum();
         assert!(spend <= cash + 0.01, "proposed spending {spend} of {cash}");
+    }
+}
+
+#[cfg(test)]
+mod history_tests {
+    use super::*;
+
+    fn series(currency: &str, days: &[(&str, f64)]) -> Series {
+        Series {
+            currency: currency.into(),
+            bars: days
+                .iter()
+                .map(|(d, c)| crate::history::Bar {
+                    day: (*d).to_string(),
+                    close: *c,
+                })
+                .collect(),
+        }
+    }
+
+    fn holding(ticker: &str, shares: f64) -> Holding {
+        Holding {
+            id: format!("h_{ticker}"),
+            ticker: ticker.into(),
+            name: ticker.into(),
+            cls: "Test".into(),
+            shares,
+            cost_basis: 0.0,
+            cost_currency: "NOK".into(),
+            target_pct: 100.0,
+        }
+    }
+
+    fn portfolio(holdings: Vec<Holding>) -> Portfolio {
+        Portfolio {
+            id: "p".into(),
+            name: "p".into(),
+            owner: String::new(),
+            band_pct: 3.0,
+            holdings,
+        }
+    }
+
+    #[test]
+    fn one_holding_tracks_its_own_price_indexed_to_a_hundred() {
+        let h = HashMap::from([(
+            "EQNR.OL".to_string(),
+            series("NOK", &[("2026-01-01", 100.0), ("2026-01-02", 110.0)]),
+        )]);
+        let out = allocation_history(
+            &portfolio(vec![holding("EQNR.OL", 10.0)]),
+            "NOK",
+            &h,
+            &HashMap::new(),
+        );
+        assert_eq!(out.points.len(), 2);
+        assert!((out.points[0].index - 100.0).abs() < 1e-9);
+        assert!(
+            (out.points[1].index - 110.0).abs() < 1e-9,
+            "{:?}",
+            out.points[1]
+        );
+        assert!(out.missing.is_empty());
+    }
+
+    #[test]
+    fn a_holiday_in_one_market_forward_fills_rather_than_dropping_the_day() {
+        // Oslo is shut on the 2nd while New York trades. Without a forward fill the chart either
+        // loses the day or values EQNR at nothing, and the second is a 50% crash that never was.
+        let h = HashMap::from([
+            (
+                "EQNR.OL".to_string(),
+                series("NOK", &[("2026-01-01", 100.0), ("2026-01-03", 100.0)]),
+            ),
+            (
+                "AAPL.OL".to_string(),
+                series(
+                    "NOK",
+                    &[
+                        ("2026-01-01", 100.0),
+                        ("2026-01-02", 200.0),
+                        ("2026-01-03", 100.0),
+                    ],
+                ),
+            ),
+        ]);
+        let out = allocation_history(
+            &portfolio(vec![holding("EQNR.OL", 1.0), holding("AAPL.OL", 1.0)]),
+            "NOK",
+            &h,
+            &HashMap::new(),
+        );
+        let day2 = out
+            .points
+            .iter()
+            .find(|p| p.day == "2026-01-02")
+            .expect("the holiday");
+        // 100 held flat + 200 doubled = 300 against a base of 200.
+        assert!((day2.index - 150.0).abs() < 1e-9, "{day2:?}");
+    }
+
+    #[test]
+    fn a_currency_move_alone_changes_the_index() {
+        // A EUR holding whose price never moves is still worth more in NOK when the krone weakens.
+        // Getting this wrong understates or overstates every foreign holding for the whole chart.
+        let h = HashMap::from([(
+            "XNAS.DE".to_string(),
+            series("EUR", &[("2026-01-01", 50.0), ("2026-01-02", 50.0)]),
+        )]);
+        let fx = HashMap::from([(
+            "EURNOK=X".to_string(),
+            series("NOK", &[("2026-01-01", 10.0), ("2026-01-02", 11.0)]),
+        )]);
+        let out = allocation_history(&portfolio(vec![holding("XNAS.DE", 1.0)]), "NOK", &h, &fx);
+        assert!(
+            (out.points[1].index - 110.0).abs() < 1e-9,
+            "{:?}",
+            out.points[1]
+        );
+    }
+
+    #[test]
+    fn a_holding_with_no_history_is_named_and_never_valued_at_zero() {
+        // The same rule as a missing quote: excluded and reported, because a zero would draw the
+        // chart as though the position had been wiped out.
+        let h = HashMap::from([(
+            "EQNR.OL".to_string(),
+            series("NOK", &[("2026-01-01", 100.0), ("2026-01-02", 110.0)]),
+        )]);
+        let out = allocation_history(
+            &portfolio(vec![holding("EQNR.OL", 1.0), holding("NOSUCH.OL", 5.0)]),
+            "NOK",
+            &h,
+            &HashMap::new(),
+        );
+        assert_eq!(out.missing, vec!["NOSUCH.OL"]);
+        assert!((out.points[1].index - 110.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_foreign_holding_with_no_fx_history_is_dropped_not_treated_as_one_to_one() {
+        // Treating a missing rate as 1.0 would value a EUR holding as though a euro were a krone,
+        // which is an error of about a factor of eleven and looks like an ordinary number.
+        let h = HashMap::from([(
+            "XNAS.DE".to_string(),
+            series("EUR", &[("2026-01-01", 50.0), ("2026-01-02", 55.0)]),
+        )]);
+        let out = allocation_history(
+            &portfolio(vec![holding("XNAS.DE", 1.0)]),
+            "NOK",
+            &h,
+            &HashMap::new(),
+        );
+        assert_eq!(out.missing, vec!["XNAS.DE"]);
+        assert!(out.points.is_empty());
+    }
+
+    #[test]
+    fn the_chart_starts_where_every_holding_has_data() {
+        // A line that gains a holding partway through jumps, and the jump reads as a gain the
+        // portfolio never made.
+        let h = HashMap::from([
+            (
+                "OLD.OL".to_string(),
+                series(
+                    "NOK",
+                    &[
+                        ("2026-01-01", 100.0),
+                        ("2026-01-02", 100.0),
+                        ("2026-01-03", 100.0),
+                    ],
+                ),
+            ),
+            (
+                "NEW.OL".to_string(),
+                series("NOK", &[("2026-01-03", 100.0)]),
+            ),
+        ]);
+        let out = allocation_history(
+            &portfolio(vec![holding("OLD.OL", 1.0), holding("NEW.OL", 1.0)]),
+            "NOK",
+            &h,
+            &HashMap::new(),
+        );
+        assert_eq!(out.points.len(), 1);
+        assert_eq!(out.points[0].day, "2026-01-03");
+    }
+
+    #[test]
+    fn an_empty_portfolio_charts_nothing_rather_than_a_flat_line_at_a_hundred() {
+        let out = allocation_history(&portfolio(vec![]), "NOK", &HashMap::new(), &HashMap::new());
+        assert!(out.points.is_empty());
     }
 }
