@@ -1,5 +1,7 @@
 //! The serde types every layer shares: what is stored, and what the API returns.
 
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
 /// A position, as the user entered it. Nothing derived is stored here.
@@ -34,6 +36,14 @@ pub struct Store {
     pub version: u32,
     pub base_currency: String,
     pub portfolios: Vec<Portfolio>,
+    /// Broker name to ticker, learned when an import is confirmed: "Xtrackers NASDAQ 100 ETF 1C"
+    /// to "XNAS.DE". Exports name funds, not symbols, and the matching cannot be fully automatic,
+    /// so the answer is kept and the next import of the same account needs no clicks.
+    ///
+    /// `default` is load-bearing: a portfolios.json written before this field existed must still
+    /// parse. A parse failure is treated as corruption and the file is moved aside.
+    #[serde(default)]
+    pub aliases: HashMap<String, String>,
 }
 
 impl Store {
@@ -42,6 +52,7 @@ impl Store {
             version: 1,
             base_currency: base_currency.to_string(),
             portfolios: Vec::new(),
+            aliases: HashMap::new(),
         }
     }
 }

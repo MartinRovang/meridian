@@ -8,7 +8,11 @@
 //! TAB separated despite the .csv name, Norwegian decimal commas, spaces as thousands separators,
 //! and a non-breaking space inside one header name. It is checked in as a fixture.
 
-use crate::types::Quote;
+use std::collections::HashMap;
+
+use serde::Serialize;
+
+use crate::types::{Holding, Portfolio, Quote};
 
 /// One position as the broker states it. No ticker: exports name the fund, not the symbol.
 #[derive(Debug, Clone, PartialEq)]
@@ -316,6 +320,126 @@ mod tests {
         assert!(t.iter().all(|s| s.split_whitespace().count() >= 2), "{t:?}");
     }
 
+    fn holding(ticker: &str, name: &str, shares: f64, cost: f64) -> Holding {
+        Holding {
+            id: format!("h_{ticker}"),
+            ticker: ticker.into(),
+            name: name.into(),
+            cls: "ETF".into(),
+            shares,
+            cost_basis: cost,
+            cost_currency: "EUR".into(),
+            target_pct: 50.0,
+        }
+    }
+
+    fn portfolio(holdings: Vec<Holding>) -> Portfolio {
+        Portfolio {
+            id: "p_1".into(),
+            name: "Test".into(),
+            owner: String::new(),
+            band_pct: 3.0,
+            holdings,
+        }
+    }
+
+    fn row(name: &str, shares: f64, gav: f64) -> Row {
+        Row {
+            name: name.into(),
+            currency: "EUR".into(),
+            shares,
+            gav,
+        }
+    }
+
+    #[test]
+    fn a_name_the_import_was_taught_resolves_without_asking_again() {
+        let aliases = HashMap::from([(
+            "xtrackers nasdaq 100 etf 1c".to_string(),
+            "XNAS.DE".to_string(),
+        )]);
+        let p = portfolio(vec![]);
+        let plan = plan(
+            &[row("Xtrackers NASDAQ 100 ETF 1C", 250.0, 59.7573)],
+            &p,
+            &aliases,
+        );
+        assert_eq!(plan.changes[0].ticker.as_deref(), Some("XNAS.DE"));
+        assert_eq!(plan.changes[0].action, Action::New);
+    }
+
+    #[test]
+    fn a_name_nobody_has_matched_yet_is_unmatched_rather_than_quietly_skipped() {
+        // A row that vanished from the preview would be a position silently not imported, which
+        // the user only discovers when their total is wrong.
+        let plan = plan(
+            &[row("Some Fund Nobody Knows", 10.0, 5.0)],
+            &portfolio(vec![]),
+            &HashMap::new(),
+        );
+        assert_eq!(plan.changes.len(), 1);
+        assert_eq!(plan.changes[0].action, Action::Unmatched);
+        assert_eq!(plan.changes[0].ticker, None);
+    }
+
+    #[test]
+    fn an_existing_holding_is_matched_by_name_and_carries_its_old_numbers() {
+        let p = portfolio(vec![holding(
+            "XNAS.DE",
+            "Xtrackers NASDAQ 100 ETF 1C",
+            200.0,
+            12_000.0,
+        )]);
+        let plan = plan(
+            &[row("Xtrackers NASDAQ 100 ETF 1C", 250.0, 60.0)],
+            &p,
+            &HashMap::new(),
+        );
+        let c = &plan.changes[0];
+        assert_eq!(c.action, Action::Update);
+        assert_eq!(c.holding_id.as_deref(), Some("h_XNAS.DE"));
+        assert_eq!(c.was_shares, Some(200.0));
+        assert_eq!(c.was_cost_basis, Some(12_000.0));
+        assert_eq!(c.cost_basis, 15_000.0);
+    }
+
+    #[test]
+    fn the_same_numbers_twice_is_unchanged_so_a_repeat_import_writes_nothing() {
+        let p = portfolio(vec![holding(
+            "XNAS.DE",
+            "Xtrackers NASDAQ 100 ETF 1C",
+            250.0,
+            15_000.0,
+        )]);
+        let plan = plan(
+            &[row("Xtrackers NASDAQ 100 ETF 1C", 250.0, 60.0)],
+            &p,
+            &HashMap::new(),
+        );
+        assert_eq!(plan.changes[0].action, Action::Unchanged);
+    }
+
+    #[test]
+    fn a_holding_the_file_does_not_mention_is_reported_and_never_deleted() {
+        // One file is one account. Treating omission as a sale would wipe positions held
+        // elsewhere, and the user would have no way to know until the total moved.
+        let p = portfolio(vec![
+            holding("XNAS.DE", "Xtrackers NASDAQ 100 ETF 1C", 250.0, 15_000.0),
+            holding("EQNR.OL", "Equinor ASA", 111.0, 38_000.0),
+        ]);
+        let plan = plan(
+            &[row("Xtrackers NASDAQ 100 ETF 1C", 250.0, 60.0)],
+            &p,
+            &HashMap::new(),
+        );
+        assert_eq!(plan.absent, vec!["EQNR.OL"]);
+        assert_eq!(
+            plan.changes.len(),
+            1,
+            "absent holdings must not become changes"
+        );
+    }
+
     #[test]
     fn candidates_in_the_wrong_currency_are_dropped() {
         // The whole reason the Valuta column is read: the same fund lists in London in GBP and in
@@ -337,4 +461,107 @@ mod tests {
             .collect();
         assert_eq!(kept, vec!["SPYY.DE", "ACWE.PA"]);
     }
+}
+
+/// What importing one row would do to the portfolio.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Action {
+    /// The ticker is not held yet.
+    New,
+    /// Held, with different shares or a different cost basis.
+    Update,
+    /// Held, with the same numbers. Applying it would write the file for nothing.
+    Unchanged,
+    /// No ticker known for this name. The user picks or types one, and it is remembered.
+    Unmatched,
+}
+
+/// One row of the preview table.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Change {
+    pub name: String,
+    pub currency: String,
+    pub shares: f64,
+    pub cost_basis: f64,
+    pub action: Action,
+    /// None exactly when the action is Unmatched.
+    pub ticker: Option<String>,
+    pub holding_id: Option<String>,
+    /// What the portfolio says today, for the "was 100, becomes 111" column.
+    pub was_shares: Option<f64>,
+    pub was_cost_basis: Option<f64>,
+}
+
+/// The whole preview: what would change, and what the file says nothing about.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Plan {
+    pub changes: Vec<Change>,
+    /// Tickers held here that this file does not mention. Information, never an action: one file
+    /// is one account, and deleting what it omits would wipe positions held somewhere else.
+    pub absent: Vec<String>,
+}
+
+/// Two money figures are the same if they agree to the ore. Floats that have been through a
+/// decimal comma, a multiplication and JSON do not come back bit-identical.
+fn same(a: f64, b: f64) -> bool {
+    (a - b).abs() < 0.005
+}
+
+/// The ticker for a broker's name: one it was taught, or one already sitting in the portfolio.
+fn resolve(name: &str, p: &Portfolio, aliases: &HashMap<String, String>) -> Option<String> {
+    let key = norm(name);
+    if let Some(t) = aliases.get(&key) {
+        return Some(t.clone());
+    }
+    p.holdings
+        .iter()
+        // An export that does name its symbols is matched on that too, which costs one comparison.
+        .find(|h| norm(&h.name) == key || h.ticker.eq_ignore_ascii_case(name.trim()))
+        .map(|h| h.ticker.clone())
+}
+
+/// What this file would do to this portfolio. Reads nothing and writes nothing: the caller shows
+/// it, the user agrees to it, and only then is anything applied.
+pub fn plan(rows: &[Row], p: &Portfolio, aliases: &HashMap<String, String>) -> Plan {
+    let changes: Vec<Change> = rows
+        .iter()
+        .map(|r| {
+            let ticker = resolve(&r.name, p, aliases);
+            let held: Option<&Holding> = ticker
+                .as_ref()
+                .and_then(|t| p.holdings.iter().find(|h| h.ticker == *t));
+            let action = match (&ticker, held) {
+                (None, _) => Action::Unmatched,
+                (Some(_), None) => Action::New,
+                (Some(_), Some(h)) => {
+                    if same(h.shares, r.shares) && same(h.cost_basis, r.cost_basis()) {
+                        Action::Unchanged
+                    } else {
+                        Action::Update
+                    }
+                }
+            };
+            Change {
+                name: r.name.clone(),
+                currency: r.currency.clone(),
+                shares: r.shares,
+                cost_basis: r.cost_basis(),
+                action,
+                ticker,
+                holding_id: held.map(|h| h.id.clone()),
+                was_shares: held.map(|h| h.shares),
+                was_cost_basis: held.map(|h| h.cost_basis),
+            }
+        })
+        .collect();
+
+    let named: Vec<&String> = changes.iter().filter_map(|c| c.ticker.as_ref()).collect();
+    let absent = p
+        .holdings
+        .iter()
+        .filter(|h| !named.contains(&&h.ticker))
+        .map(|h| h.ticker.clone())
+        .collect();
+    Plan { changes, absent }
 }

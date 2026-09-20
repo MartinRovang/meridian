@@ -151,4 +151,21 @@ mod tests {
             .collect();
         assert!(strays.is_empty(), "temp files left behind: {strays:?}");
     }
+
+    #[test]
+    fn a_portfolios_json_written_before_aliases_existed_still_loads() {
+        // A store that fails to parse is treated as corrupt and moved aside, so adding a field
+        // without a default would look to the user like losing every position they had.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cfg = Config::new(dir.path().to_path_buf(), crate::config::Scope::Scandinavia);
+        std::fs::create_dir_all(&cfg.store_dir).expect("mkdir");
+        std::fs::write(
+            cfg.portfolios_path(),
+            br#"{"version":1,"base_currency":"NOK","portfolios":[]}"#,
+        )
+        .expect("write");
+        let s = load(&cfg).expect("loads");
+        assert_eq!(s.base_currency, "NOK");
+        assert!(s.aliases.is_empty());
+    }
 }
