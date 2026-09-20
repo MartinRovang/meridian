@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { get } from './api'
+import { SkelHits } from './Skeleton'
 
 export type Hit = { symbol: string; name: string; exchange: string; currency: string }
 
@@ -20,6 +21,10 @@ export function TickerSearch({ onPick }: { onPick: (hit: Hit) => void }) {
     }
     const mine = ++seq.current
     setBusy(true)
+    // The previous query's hits answer a question the user has stopped asking: leaving them up
+    // means "volvo" can show EQNR.OL, and a fast click adds the wrong holding. This is the one
+    // place a skeleton replaces rows that are already on screen, because those rows are wrong.
+    setHits([])
     const t = setTimeout(() => {
       get<{ hits: Hit[] }>(`/api/search?q=${encodeURIComponent(q)}`)
         .then((r) => {
@@ -60,11 +65,11 @@ export function TickerSearch({ onPick }: { onPick: (hit: Hit) => void }) {
               <span className="text-muted">{h.exchange}</span>
             </div>
           ))}
-          {!hits.length ? (
-            <div className="hit text-muted">
-              {busy ? 'Searching' : 'Nothing in this market scope'}
-            </div>
-          ) : null}
+          {hits.length ? null : busy ? (
+            <SkelHits />
+          ) : (
+            <div className="hit text-muted">Nothing in this market scope</div>
+          )}
         </div>
       ) : null}
     </div>

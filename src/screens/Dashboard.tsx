@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { post } from '../api'
 import { money, pct, price, signed } from '../format'
+import { SkelScreen } from '../Skeleton'
 import { useApp } from '../store'
 import { Donut, hue } from './Donut'
 
@@ -11,7 +12,7 @@ const tone = (n: number) => (n > 0 ? 'up' : n < 0 ? 'down' : 'flat')
 export function Dashboard() {
   const { state, pid, setPid, setScreen, load } = useApp()
   const [busy, setBusy] = useState(false)
-  if (!state) return null
+  if (!state) return <SkelScreen />
 
   const p = state.portfolios.find((x) => x.id === pid) ?? state.portfolios[0]
   if (!p) {

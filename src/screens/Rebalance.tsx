@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { get } from '../api'
+import { SkelScreen, SkelTrades } from '../Skeleton'
 import { money, pct, signed } from '../format'
 import { useApp } from '../store'
 
@@ -40,7 +41,7 @@ export function Rebalance() {
     return () => clearTimeout(t)
   }, [id, cash])
 
-  if (!state) return null
+  if (!state) return <SkelScreen />
   if (!p) return <p className="text-muted">No portfolios yet.</p>
 
   const rows = state.drift.find((d) => d.id === p.id)?.rows ?? []
@@ -112,7 +113,7 @@ export function Rebalance() {
             </div>
           </div>
         ) : trades === null ? (
-          <p className="text-muted">Working it out.</p>
+          <SkelTrades />
         ) : trades.length === 0 ? (
           <p className="text-muted">Nothing to do: every holding is within its band.</p>
         ) : (

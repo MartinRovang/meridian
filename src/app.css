@@ -130,3 +130,15 @@ tr.breached td:first-child { box-shadow: inset 2px 0 0 var(--color-accent); }
 .refusal > i { font-size: 20px; color: var(--color-down); margin-top: 2px; }
 .refusal .text-muted { font-size: 12px; }
 .trade { display: grid; grid-template-columns: 48px 80px 1fr auto; gap: 12px; align-items: baseline; }
+
+/* ponytail: one pulse, one property. The splash's shimmer is a text effect (background-clip: text)
+   and does not transfer to a block; a gradient sweep across dozens of bars would repaint the whole
+   window every frame, which is the exact mistake the splash notes warn about. Opacity composites. */
+@keyframes skel-pulse { 50% { opacity: 0.4; } }
+.skel {
+  display: inline-block; border-radius: var(--radius-sm);
+  background: var(--color-neutral-800);
+  animation: skel-pulse 1.5s ease-in-out infinite;
+}
+/* A pulsing page is a migraine trigger, and the layout alone already says "loading". */
+@media (prefers-reduced-motion: reduce) { .skel { animation: none; } }

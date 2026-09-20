@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { del, patch, post } from '../api'
 import { pct } from '../format'
+import { SkelScreen } from '../Skeleton'
 import { TickerSearch, type Hit } from '../TickerSearch'
 import { useApp, type Holding } from '../store'
 
@@ -19,7 +20,7 @@ export function Builder() {
   // packaged webview cannot be relied on to show. confirm() stays: it is implemented, and if it
   // ever were not, the failure is "the delete does not happen".
   const [naming, setNaming] = useState<{ mode: 'new' | 'rename'; value: string } | null>(null)
-  if (!state) return null
+  if (!state) return <SkelScreen />
 
   const p = state.portfolios.find((x) => x.id === pid) ?? state.portfolios[0]
   const run = async (f: () => Promise<unknown>) => {
