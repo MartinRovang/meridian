@@ -111,7 +111,7 @@ fn decode(bytes: &[u8]) -> String {
 /// A header cell reduced to something an alias can be compared against. The non-breaking space is
 /// the point: a header that differs from its alias only by an invisible character is the same
 /// header, and treating it as missing would refuse a perfectly good file.
-fn norm(cell: &str) -> String {
+pub fn norm(cell: &str) -> String {
     cell.replace('\u{a0}', " ")
         .trim()
         .to_lowercase()

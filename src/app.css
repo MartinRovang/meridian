@@ -142,3 +142,17 @@ tr.breached td:first-child { box-shadow: inset 2px 0 0 var(--color-accent); }
 }
 /* A pulsing page is a migraine trigger, and the layout alone already says "loading". */
 @media (prefers-reduced-motion: reduce) { .skel { animation: none; } }
+
+/* Import. The drop zone is a button that happens to accept a drag: a dashed outline is the one
+   affordance people already read as "a file goes here". */
+.drop {
+  display: flex; align-items: center; gap: 14px; cursor: pointer;
+  padding: var(--space-3) var(--space-4); margin-bottom: var(--space-3);
+  border: 1px dashed var(--color-neutral-700); border-radius: var(--radius-md);
+  font-size: 13px;
+}
+.drop:hover { border-color: var(--color-accent); background: color-mix(in srgb, var(--color-text) 3%, transparent); }
+.drop > i { font-size: 22px; color: var(--color-accent); }
+.picker { display: flex; gap: 8px; align-items: center; }
+.picker .input { font-size: 12px; padding: 4px 8px; }
+.picker .input.cell { width: 104px; text-align: left; }

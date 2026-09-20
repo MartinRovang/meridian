@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { del, patch, post } from '../api'
 import { pct } from '../format'
+import { Import } from './Import'
 import { SkelScreen } from '../Skeleton'
 import { TickerSearch, type Hit } from '../TickerSearch'
 import { useApp, type Holding } from '../store'
@@ -298,6 +299,8 @@ export function Builder() {
               </p>
             ) : null}
           </section>
+
+          <Import pid={p.id} onDone={() => void reload()} />
         </>
       ) : null}
     </div>

@@ -33,6 +33,27 @@ async function call<T>(method: string, path: string, body?: unknown): Promise<T>
   return parsed as T
 }
 
+/// Send a file exactly as it sits on disk.
+///
+/// Not JSON: broker exports are commonly UTF-16, and a JSON string would destroy the encoding the
+/// parser on the other end exists to cope with.
+export async function postFile<T>(path: string, file: ArrayBuffer): Promise<T> {
+  let res: Response
+  try {
+    res = await fetch(`${base}${path}`, {
+      method: 'POST',
+      headers: { 'X-Meridian-Token': token, 'Content-Type': 'application/octet-stream' },
+      body: file,
+    })
+  } catch {
+    throw new Error(`cannot reach ${base}`)
+  }
+  const text = await res.text()
+  const parsed = text ? (JSON.parse(text) as Record<string, unknown>) : {}
+  if (!res.ok) throw new Error((parsed.error as string) || `${res.status}`)
+  return parsed as T
+}
+
 export const get = <T,>(path: string) => call<T>('GET', path)
 export const post = <T,>(path: string, body?: unknown) => call<T>('POST', path, body ?? {})
 export const patch = <T,>(path: string, body: unknown) => call<T>('PATCH', path, body)

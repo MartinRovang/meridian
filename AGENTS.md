@@ -53,6 +53,28 @@ unrelated to the change.
 exist to reach the network. Their parsing halves are covered in core, and both
 are verified by hand against live data before release.
 
+## Importing a broker export
+
+`crates/core/src/import.rs` parses the file and works out what it would change;
+the server exposes preview, candidates and apply; the Builder shows the preview
+and asks. Rules that are not negotiable:
+
+- **An import never deletes.** One file is one account. Holdings the file omits
+  are listed as information and left alone.
+- **GAV is per share, `cost_basis` is the total.** Confusing them is silent.
+- **A row without a ticker is never guessed into existence.** Exports name funds,
+  not symbols. The user picks a listing or types one, and the answer is kept in
+  `Store::aliases` so the next import of that account needs no clicks.
+- **Currency and the broker's printed price choose the listing.** The same fund
+  lists in several currencies; attaching a EUR holding to the London USD line
+  misprices it by around 15% and never errors.
+- Imported holdings start at `target_pct: 0`, so Rebalance keeps refusing until
+  the user sets targets. That refusal is correct, not a bug to paper over.
+
+The preview route takes raw bytes rather than JSON: these exports are commonly
+UTF-16, and a JSON string would destroy the encoding the parser exists to cope
+with.
+
 ## Caching quotes
 
 The cache is a `HashMap<String, Quote>` behind a mutex, mirrored to

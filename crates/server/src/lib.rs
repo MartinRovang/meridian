@@ -506,7 +506,9 @@ fn import_apply(ctx: &Ctx, b: &Value) -> Out {
     if let Some(a) = b.get("aliases").and_then(|a| a.as_object()) {
         for (name, ticker) in a {
             if let Some(t) = ticker.as_str() {
-                s.aliases.insert(name.clone(), t.to_uppercase());
+                // Normalised here rather than in the browser: the lookup that reads these keys
+                // is in core, and two implementations of the same normalisation drift.
+                s.aliases.insert(import::norm(name), t.to_uppercase());
             }
         }
     }
