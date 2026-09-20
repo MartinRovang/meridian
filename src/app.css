@@ -51,3 +51,50 @@ body { -webkit-font-smoothing: antialiased; overflow: hidden; }
   background: var(--color-surface); box-shadow: var(--shadow-sm); font-size: 13px;
 }
 .banner.bad { box-shadow: inset 0 0 0 1px var(--color-accent-700); color: var(--color-accent-200); }
+
+/* Gain and loss. Nocturne has no semantic up/down token, so these two are the design file's own
+   UP and DOWN constants, declared once here rather than inline in a component. */
+:root { --color-up: #6fbf94; --color-down: #d1766a; }
+.up { color: var(--color-up); }
+.down { color: var(--color-down); }
+.flat { color: var(--color-neutral-500); }
+.num { text-align: right; font-variant-numeric: tabular-nums; }
+
+.screen { display: flex; flex-direction: column; gap: 20px; }
+
+.stat-band { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+.stat-head { display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap; }
+.stat-total {
+  font-family: var(--font-heading); font-size: 40px; letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+}
+.stat-day { font-size: 15px; }
+.stat-pl { font-size: 13px; }
+.stat-actions { display: flex; align-items: center; gap: 10px; }
+.pick { width: auto; min-width: 180px; }
+
+.callout {
+  display: flex; align-items: center; gap: 14px;
+  border: 1px solid var(--color-accent-800); background: var(--color-accent-900);
+  border-radius: var(--radius-md); padding: 12px 16px; font-size: 14px;
+}
+.callout > i { font-size: 20px; color: var(--color-accent-400); }
+.callout > div { flex: 1; min-width: 0; }
+.callout .text-muted { font-size: 12px; }
+
+.split { display: grid; grid-template-columns: 1.4fr 1fr; gap: 16px; }
+@media (max-width: 1100px) { .split { grid-template-columns: 1fr; } }
+.panel {
+  border: 1px solid var(--color-neutral-800); border-radius: var(--radius-md);
+  padding: 18px 20px; background: var(--color-surface);
+}
+.panel-head { font-size: 13px; color: var(--color-neutral-500); margin-bottom: 14px; }
+
+.alloc { display: flex; align-items: center; gap: 20px; }
+.donut { width: 160px; height: 160px; flex: 0 0 160px; }
+.legend { display: flex; flex-direction: column; gap: 11px; flex: 1; min-width: 0; font-size: 13px; }
+.legend-row { display: grid; grid-template-columns: 14px 1fr 62px 110px; align-items: center; gap: 10px; }
+.legend-row.drift { grid-template-columns: 1fr 62px 84px 76px; }
+.swatch { width: 9px; height: 9px; border-radius: 2px; }
+.legend-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.legend-row .tag { justify-self: end; font-variant-numeric: tabular-nums; }

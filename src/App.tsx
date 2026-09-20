@@ -1,7 +1,8 @@
 import { useEffect } from 'react'
-import { apiBase } from './api'
+import { apiBase, post } from './api'
 import { Sidebar } from './Sidebar'
 import { Splash } from './Splash'
+import { Dashboard } from './screens/Dashboard'
 import { useApp } from './store'
 
 const TITLES: Record<string, [string, string]> = {
@@ -11,7 +12,12 @@ const TITLES: Record<string, [string, string]> = {
 }
 
 export function App() {
-  const { ready, steps, error, screen, state, boot } = useApp()
+  const { ready, steps, error, screen, state, boot, load } = useApp()
+
+  const retry = async () => {
+    await post('/api/refresh').catch(() => undefined)
+    await load()
+  }
 
   useEffect(() => {
     void boot()
@@ -37,12 +43,18 @@ export function App() {
         ) : null}
         {state?.stale ? (
           <div className="banner">
-            Prices are stale. The last refresh was {Math.round((state.quotes_age_secs ?? 0) / 60)}{' '}
-            minutes ago.
+            Prices are {Math.round((state.quotes_age_secs ?? 0) / 60)} minutes old.
+            <button className="btn btn-ghost" onClick={() => void retry()}>
+              Retry
+            </button>
           </div>
         ) : null}
-        {/* Screens land in Tasks 12 to 14. */}
-        <p className="text-muted">{title} is not built yet.</p>
+        {screen === 'dashboard' ? (
+          <Dashboard />
+        ) : (
+          // Builder and Rebalance land in Tasks 13 and 14.
+          <p className="text-muted">{title} is not built yet.</p>
+        )}
       </main>
     </div>
   )
