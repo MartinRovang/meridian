@@ -2,6 +2,7 @@ import { useEffect } from 'react'
 import { apiBase, post } from './api'
 import { Sidebar } from './Sidebar'
 import { Splash } from './Splash'
+import { Builder } from './screens/Builder'
 import { Dashboard } from './screens/Dashboard'
 import { useApp } from './store'
 
@@ -22,6 +23,14 @@ export function App() {
   useEffect(() => {
     void boot()
   }, [boot])
+
+  useEffect(() => {
+    // The screen lives in the hash, so the window's own back and forward must move it. Without
+    // this the address changes and the UI does not.
+    const onHash = () => useApp.setState({ screen: location.hash.slice(1) || 'dashboard' })
+    addEventListener('hashchange', onHash)
+    return () => removeEventListener('hashchange', onHash)
+  }, [])
 
   if (!ready) return <Splash steps={steps} error={error} />
 
@@ -51,8 +60,10 @@ export function App() {
         ) : null}
         {screen === 'dashboard' ? (
           <Dashboard />
+        ) : screen === 'builder' ? (
+          <Builder />
         ) : (
-          // Builder and Rebalance land in Tasks 13 and 14.
+          // Rebalance lands in Task 14.
           <p className="text-muted">{title} is not built yet.</p>
         )}
       </main>

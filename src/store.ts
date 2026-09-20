@@ -4,7 +4,8 @@ import { configure, get, post } from './api'
 export type Holding = {
   id: string; ticker: string; name: string; cls: string; shares: number
   price: number; currency: string; value: number; day_pct: number
-  pl: number; pl_pct: number; weight_pct: number; target_pct: number; priced: boolean
+  pl: number; pl_pct: number; weight_pct: number; target_pct: number
+  cost_basis: number; cost_currency: string; priced: boolean
 }
 export type ClassSlice = { cls: string; value: number; pct: number }
 export type Portfolio = {

@@ -27,6 +27,10 @@ pub struct HoldingView {
     pub pl_pct: f64,
     pub weight_pct: f64,
     pub target_pct: f64,
+    /// What was paid, in `cost_currency`. Carried through unconverted because the Builder edits
+    /// it: a value round-tripped through base currency would drift on every save.
+    pub cost_basis: f64,
+    pub cost_currency: String,
     pub priced: bool,
 }
 
@@ -81,6 +85,8 @@ pub fn view_holding(h: &Holding, base: &str, cache: &Cache) -> HoldingView {
         pl_pct: 0.0,
         weight_pct: 0.0,
         target_pct: h.target_pct,
+        cost_basis: h.cost_basis,
+        cost_currency: h.cost_currency.clone(),
         priced: false,
     };
     let Some(q) = cache.get(&h.ticker) else {
@@ -113,6 +119,8 @@ pub fn view_holding(h: &Holding, base: &str, cache: &Cache) -> HoldingView {
         // filled in by view_portfolio, which is the only thing that knows the total
         weight_pct: 0.0,
         target_pct: h.target_pct,
+        cost_basis: h.cost_basis,
+        cost_currency: h.cost_currency.clone(),
         priced: true,
     }
 }
@@ -568,5 +576,16 @@ mod tests {
         assert_eq!(v.day_pct, 0.0);
         assert!(v.holdings.is_empty());
         assert!(v.by_class.is_empty());
+    }
+
+    #[test]
+    fn the_cost_basis_survives_an_unpriced_holding_so_the_builder_can_still_correct_it() {
+        // A holding with no quote is exactly the one a user needs to edit. If the view dropped
+        // its cost basis, saving that edit would silently rewrite it to zero.
+        let h = holding("h1", "NOPE.OL", 5.0, 1234.5, "SEK", 10.0);
+        let v = view_holding(&h, "NOK", &cache());
+        assert!(!v.priced);
+        assert_eq!(v.cost_basis, 1234.5);
+        assert_eq!(v.cost_currency, "SEK");
     }
 }
