@@ -25,6 +25,16 @@ type Result = {
   method: string
   cost_bps: number
   unusable: string[]
+  forecast: {
+    horizon_years: number
+    expected_pct: number
+    low_pct: number
+    high_pct: number
+    predicted_test_pct: number
+    realised_test_pct: number
+    predictiveness: number
+    measured_over: number
+  }
   correlation: number[][]
   div_ratio: number
 }
@@ -41,6 +51,7 @@ export function Discover() {
   const [years, setYears] = useState(5)
   const [method, setMethod] = useState('minvar')
   const [cost, setCost] = useState(25)
+  const [horizon, setHorizon] = useState(1)
   const [out, setOut] = useState<Result | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
@@ -65,6 +76,7 @@ export function Discover() {
         years: String(years),
         method,
         cost_bps: String(cost),
+        horizon: String(horizon),
       })
       setOut(await get<Result>(`/api/discover?${q.toString()}`))
     } catch (e: unknown) {
@@ -134,6 +146,18 @@ export function Discover() {
               onChange={(e) => setCost(Number(e.target.value))}
             />
           </label>
+          <label>
+            <span className="text-muted">Forecast horizon, years</span>
+            <input
+              className="input num"
+              type="number"
+              min={0.25}
+              max={2}
+              step={0.25}
+              value={horizon}
+              onChange={(e) => setHorizon(Number(e.target.value))}
+            />
+          </label>
           <button className="btn btn-primary" onClick={() => void run()} disabled={busy || !market}>
             <i className="ph ph-magnifying-glass" />
             {busy ? 'Searching' : 'Search'}
@@ -197,6 +221,8 @@ function Found({ out }: { out: Result }) {
           </tbody>
         </table>
       </section>
+
+      <Outlook out={out} />
 
       <section className="panel">
         <div className="panel-head">
@@ -276,6 +302,59 @@ function Found({ out }: { out: Result }) {
         </p>
       ) : null}
     </>
+  )
+}
+
+function Outlook({ out }: { out: Result }) {
+  const f = out.forecast
+  const months = Math.round(f.horizon_years * 12)
+  const miss = f.realised_test_pct - f.predicted_test_pct
+  // Anything under this is not a relationship, it is a rounding of nothing.
+  const weak = Math.abs(f.predictiveness) < 0.2
+
+  return (
+    <section className="panel">
+      <div className="panel-head">What this implies about the next {months} months</div>
+      <div className="stat-row">
+        <Stat label="Central estimate" value={`${signed(f.expected_pct)}%`} />
+        <Stat
+          label="95% interval"
+          value={`${signed(f.low_pct)}% to ${signed(f.high_pct)}%`}
+          tone={f.low_pct < 0 ? 'down' : undefined}
+        />
+        <Stat
+          label="Last time, predicted"
+          value={`${signed(f.predicted_test_pct)}%`}
+        />
+        <Stat
+          label="Last time, actual"
+          value={`${signed(f.realised_test_pct)}%`}
+          tone={Math.abs(miss) > 10 ? 'down' : undefined}
+        />
+      </div>
+      <p className="warn-soft">
+        The central estimate is the training window&apos;s average return, and it is the weakest
+        number on this screen. The interval beside it is the honest width: it carries both how far
+        returns scatter over {months} months and how badly a mean estimated from a few years is
+        pinned down in the first place. If that interval spans zero, this basket has no expected
+        direction that can be distinguished from none.
+      </p>
+      <p className="text-muted">
+        The two right-hand figures are the only calibration available: what this same method
+        predicted for the held-out window before reading it, against what the window actually did.
+        It was out by {Math.abs(miss).toFixed(1)} percentage points.
+      </p>
+      <p className="text-muted">
+        Across all {f.measured_over} usable listings, the correlation between a stock&apos;s return
+        over the training window and its return over the held-out one was{' '}
+        <strong>{f.predictiveness.toFixed(2)}</strong>.{' '}
+        {weak
+          ? 'That is close to nothing: in this market over this period, past return told you essentially nothing about the next stretch. This is measured from the data above, not an opinion about markets.'
+          : f.predictiveness < 0
+            ? 'Negative, meaning last period\u2019s winners tended to be next period\u2019s losers here.'
+            : 'Positive, which is unusual enough over a single split to be worth treating as luck until it repeats.'}
+      </p>
+    </section>
   )
 }
 

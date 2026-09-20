@@ -222,6 +222,31 @@ breaks ties by the lower index. Two identical requests return the same basket to
 the last decimal, which is the difference between a search you can argue with
 and one you cannot.
 
+### The forecast
+
+Discover reports an expected return over a horizon you choose, and it is the
+weakest number in the app. Three things keep it honest, and none of them is
+optional.
+
+**The interval carries both ignorances.** `sd = vol * sqrt(h + h^2 / T)`: the
+first term is how far returns scatter over the horizon, the second is how badly
+the mean itself is pinned down by a training window of `T` years. A band built
+from volatility alone is too narrow and, worse, shrinks toward nothing as the
+horizon shrinks, which is false. On the Nordic field over a year the interval
+runs from -5.8% to +48.8% around a central +21.5%: it spans zero, and that is
+the finding.
+
+**A calibration the screen cannot fudge.** The same method is pointed at the
+held-out window using only training data, and the prediction is shown beside
+what actually happened. Most recently +31.0% predicted against +27.5% realised.
+
+**Predictiveness is measured, not asserted.** The correlation across every
+usable listing between its training-window return and its held-out return.
+Across 112 Nordic listings it came out at 0.29. Measured over one split, so the
+screen calls it luck until it repeats. It is computed over all usable listings
+rather than the picked ones, because the picked ones were chosen for their past
+and would answer the question with their own selection.
+
 `All Nordic` searches all three exchanges at once, which is where the search has
 most to work with: 112 usable listings, a diversification ratio of 1.76 against
 Oslo's own, and correlations among the picks between 0.12 and 0.36. Three

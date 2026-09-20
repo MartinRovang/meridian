@@ -542,6 +542,10 @@ fn discover_route(ctx: &Ctx, q: &HashMap<String, String>) -> Out {
     if !(2.0..=10.0).contains(&years) {
         return Err(Fail::new(400, "years must be between 2 and 10"));
     }
+    let horizon: f64 = q.get("horizon").and_then(|x| x.parse().ok()).unwrap_or(1.0);
+    if !(0.25..=2.0).contains(&horizon) {
+        return Err(Fail::new(400, "horizon must be between 0.25 and 2 years"));
+    }
     if !(1..=12).contains(&n) {
         return Err(Fail::new(400, "n must be between 1 and 12"));
     }
@@ -558,7 +562,16 @@ fn discover_route(ctx: &Ctx, q: &HashMap<String, String>) -> Out {
     // keeps a five-year window from drifting a day per leap year.
     let since = history::day(chrono::Utc::now().timestamp() - (years * 365.25 * 86_400.0) as i64);
     let (m, unusable) = optimize::build_since(&listed, &s.base_currency, &loaded, &fx, &since);
-    let out = discover::search(&m, unusable, listed.len(), n, method, top_k, cost_bps);
+    let out = discover::search(
+        &m,
+        unusable,
+        listed.len(),
+        n,
+        method,
+        top_k,
+        cost_bps,
+        horizon,
+    );
     serde_json::to_value(&out).map_err(|e| Fail::new(500, e.to_string()))
 }
 

@@ -70,6 +70,27 @@ pub struct Outcome {
     pub days: usize,
 }
 
+/// What the training window implies about the next stretch, and how much that is worth.
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct Forecast {
+    pub horizon_years: f64,
+    /// The central estimate, in percent over the horizon. Believe the interval, not this.
+    pub expected_pct: f64,
+    /// 95% interval, combining two separate ignorances: the mean itself is estimated from a
+    /// finite window, and returns scatter around whatever the mean turns out to be.
+    pub low_pct: f64,
+    pub high_pct: f64,
+    /// The same method, pointed at the held-out window before it was read, and what actually
+    /// happened over it. The one honest calibration this screen can offer.
+    pub predicted_test_pct: f64,
+    pub realised_test_pct: f64,
+    /// Correlation across every usable listing between its return over the training window and
+    /// its return over the held-out one. Near zero means the past did not predict the future in
+    /// this market over this period, measured rather than asserted.
+    pub predictiveness: f64,
+    pub measured_over: usize,
+}
+
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct Discovery {
     pub picks: Vec<Pick>,
@@ -90,9 +111,63 @@ pub struct Discovery {
     /// whether the search found five different things or five banks.
     pub correlation: Vec<Vec<f64>>,
     pub div_ratio: f64,
+    pub forecast: Forecast,
     /// Symbols the list carries that have no usable history, so a stale list is visible rather
     /// than silently smaller.
     pub unusable: Vec<String>,
+}
+
+/// Pearson correlation between two equal-length samples.
+fn pearson(a: &[f64], b: &[f64]) -> f64 {
+    let n = a.len();
+    if n < 2 || b.len() != n {
+        return 0.0;
+    }
+    let ma = a.iter().sum::<f64>() / n as f64;
+    let mb = b.iter().sum::<f64>() / n as f64;
+    let mut top = 0.0;
+    let mut sa = 0.0;
+    let mut sb = 0.0;
+    for i in 0..n {
+        top += (a[i] - ma) * (b[i] - mb);
+        sa += (a[i] - ma).powi(2);
+        sb += (b[i] - mb).powi(2);
+    }
+    if sa <= 0.0 || sb <= 0.0 {
+        return 0.0;
+    }
+    top / (sa * sb).sqrt()
+}
+
+/// Does a listing's past return say anything about its next one, in this market over this period?
+///
+/// One number, measured across every usable listing rather than across the handful that were
+/// picked, because the picked ones were chosen for their past and would answer the question with
+/// their own selection.
+fn predictiveness(train: &Matrix, test: &Matrix) -> f64 {
+    pearson(&means(train), &means(test))
+}
+
+/// The estimate and its interval. The calibration fields are filled in by the caller, which is
+/// the only thing allowed to look at the held-out window.
+///
+/// `sd` combines the scatter of returns over the horizon with the standard error of the mean
+/// itself, which is why the interval is wider than a volatility alone would make it, and why it
+/// narrows so slowly: the mean's own error only shrinks with the square root of the window.
+fn forecast(mu: f64, vol: f64, train_years: f64, horizon: f64) -> Forecast {
+    let expected = mu * horizon;
+    let sd = if train_years > 0.0 {
+        vol * (horizon + horizon * horizon / train_years).sqrt()
+    } else {
+        vol * horizon.sqrt()
+    };
+    Forecast {
+        horizon_years: horizon,
+        expected_pct: expected,
+        low_pct: expected - 1.96 * sd,
+        high_pct: expected + 1.96 * sd,
+        ..Forecast::default()
+    }
 }
 
 fn shrink_cov(cov: &[Vec<f64>]) -> Vec<Vec<f64>> {
@@ -383,6 +458,7 @@ fn pick(train: &Matrix, kept: &[usize], n: usize, method: &str) -> (Vec<usize>, 
 
 /// Find a basket of `n` from `m`, choosing on the earlier part of the window and reporting on the
 /// later part.
+#[allow(clippy::too_many_arguments)]
 pub fn search(
     m: &Matrix,
     unusable: Vec<String>,
@@ -391,6 +467,7 @@ pub fn search(
     method: &str,
     top_k: usize,
     cost_bps: f64,
+    horizon: f64,
 ) -> Discovery {
     let base = Discovery {
         listed,
@@ -425,6 +502,27 @@ pub fn search(
     let equal = vec![1.0 / want.len() as f64; want.len()];
     let risk = crate::optimize::risk_contributions(&cov, &w);
 
+    // Everything the forecast is built from comes from the training window: the expected return,
+    // the volatility around it, and the length of window the estimate rests on. The realised
+    // figure is read afterwards and only ever compared against, never fitted to.
+    let train_mu: f64 = shrink_mean(&means(&train_sub))
+        .iter()
+        .enumerate()
+        .map(|(i, m)| w[i] * m)
+        .sum::<f64>()
+        * 100.0;
+    let train_vol = crate::optimize::volatility(&cov, &w);
+    let train_years = train_sub.len() as f64 / YEAR;
+    let test_years = test_sub.len() as f64 / YEAR;
+    let realised = walk(&test_sub, &w, REBALANCE_DAYS, cost_bps);
+    let fc = Forecast {
+        predicted_test_pct: train_mu * test_years,
+        realised_test_pct: realised.total_pct,
+        predictiveness: predictiveness(&train, &test),
+        measured_over: m.width(),
+        ..forecast(train_mu, train_vol, train_years, horizon)
+    };
+
     Discovery {
         picks: want
             .iter()
@@ -446,6 +544,7 @@ pub fn search(
         exhaustive,
         correlation: crate::optimize::correlation(&cov),
         div_ratio: crate::optimize::diversification_ratio(&cov, &w),
+        forecast: fc,
         ..base
     }
 }
@@ -562,7 +661,7 @@ mod tests {
             })
             .collect();
         let m = matrix(&["A.OL", "B.OL", "C.OL"], rows);
-        let out = search(&m, Vec::new(), 3, 1, "sharpe", 30, 0.0);
+        let out = search(&m, Vec::new(), 3, 1, "sharpe", 30, 0.0, 1.0);
         assert_eq!(out.picks.len(), 1);
         assert_eq!(
             out.picks[0].symbol, "A.OL",
@@ -586,7 +685,7 @@ mod tests {
             })
             .collect();
         let m = matrix(&["A.OL", "TWIN.OL", "C.OL"], rows);
-        let out = search(&m, Vec::new(), 3, 2, "minvar", 30, 0.0);
+        let out = search(&m, Vec::new(), 3, 2, "minvar", 30, 0.0, 1.0);
         let picked: Vec<&str> = out.picks.iter().map(|p| p.symbol.as_str()).collect();
         assert!(
             !(picked.contains(&"A.OL") && picked.contains(&"TWIN.OL")),
@@ -619,9 +718,75 @@ mod tests {
     }
 
     #[test]
+    fn the_forecast_interval_widens_with_the_horizon_and_with_a_shorter_window() {
+        // 12% volatility, a 20% expected return, three years of window. The interval must carry
+        // both ignorances: how returns scatter over the horizon, and how badly the mean itself is
+        // pinned down by a finite window. A band built from volatility alone would be too narrow,
+        // and would narrow to nothing as the horizon shrinks, which is not true.
+        let half = forecast(20.0, 12.0, 3.0, 0.5);
+        let year = forecast(20.0, 12.0, 3.0, 1.0);
+        assert!((half.expected_pct - 10.0).abs() < 1e-9, "{half:?}");
+        assert!((year.expected_pct - 20.0).abs() < 1e-9);
+        let width = |f: &Forecast| f.high_pct - f.low_pct;
+        assert!(width(&year) > width(&half), "{year:?} {half:?}");
+        // A volatility-only band over a year would be 1.96 * 12 * 2 = 47 points wide. The mean's
+        // own error makes it wider, and that difference is the honest part.
+        assert!(width(&year) > 47.0, "{}", width(&year));
+        let short_window = forecast(20.0, 12.0, 1.0, 1.0);
+        assert!(width(&short_window) > width(&year), "less data, wider band");
+    }
+
+    #[test]
+    fn predictiveness_measures_the_past_against_the_future_rather_than_asserting_it() {
+        // Three assets whose ranking holds across the split, then three whose ranking inverts.
+        let rows = |a: f64, b: f64, c: f64, n: usize| -> Vec<Vec<f64>> {
+            (0..n).map(|_| vec![a, b, c]).collect()
+        };
+        let same_order = matrix(&["A", "B", "C"], rows(0.001, 0.002, 0.003, 100));
+        assert!(
+            (predictiveness(&same_order, &same_order) - 1.0).abs() < 1e-9,
+            "identical windows rank identically"
+        );
+        let flipped = matrix(&["A", "B", "C"], rows(0.003, 0.002, 0.001, 100));
+        assert!(
+            (predictiveness(&same_order, &flipped) + 1.0).abs() < 1e-9,
+            "a perfect inversion is minus one, not zero"
+        );
+    }
+
+    #[test]
+    fn the_forecast_is_built_from_training_data_and_compared_against_the_rest() {
+        // The predicted figure for the held-out window must come from the training window only,
+        // so it can disagree with what happened. A forecast that matches the realisation exactly
+        // is a forecast that read the answer.
+        let n = 1000;
+        let split = n * 7 / 10;
+        let rows: Vec<Vec<f64>> = (0..n)
+            .map(|i| {
+                let wobble = if i % 2 == 0 { 0.01 } else { -0.01 };
+                if i < split {
+                    vec![0.004, -0.002, wobble]
+                } else {
+                    vec![-0.002, 0.004, wobble]
+                }
+            })
+            .collect();
+        let m = matrix(&["A.OL", "B.OL", "C.OL"], rows);
+        let out = search(&m, Vec::new(), 3, 1, "sharpe", 30, 0.0, 1.0);
+        let f = &out.forecast;
+        assert!(
+            f.predicted_test_pct > 0.0,
+            "the training window rose: {f:?}"
+        );
+        assert!(f.realised_test_pct < 0.0, "the held-out one fell: {f:?}");
+        assert_eq!(f.measured_over, 3);
+        assert!(f.predictiveness < 0.0, "the ranking inverted: {f:?}");
+    }
+
+    #[test]
     fn too_little_history_returns_nothing_rather_than_a_guess() {
         let m = flat(100, 2);
-        let out = search(&m, Vec::new(), 2, 1, "minvar", 30, 0.0);
+        let out = search(&m, Vec::new(), 2, 1, "minvar", 30, 0.0, 1.0);
         assert!(out.picks.is_empty());
         assert_eq!(out.usable, 2);
     }
