@@ -61,6 +61,11 @@ export const useApp = create<App>((set, getState) => ({
       await get('/api/health')
       tick(0)
       await getState().load()
+      // load() keeps its own errors so the app can stay up when a later refresh fails. During boot
+      // that is wrong: /api/health needs no token, so a bad one gets this far and would hand the
+      // user an empty dashboard that reads as "you hold nothing" rather than "you are not allowed
+      // in". Stop on the splash, where the error is the only thing on screen.
+      if (getState().error) return
       tick(1)
       // ponytail: the splash exists because THIS call can be slow: a round trip per held symbol
       // plus its fx pairs, eight at a time. Symbols quoted in the last minute are skipped, so a

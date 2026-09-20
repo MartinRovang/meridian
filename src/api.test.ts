@@ -42,7 +42,15 @@ test('an error status surfaces the server message rather than a blank failure', 
   await expect(get('/api/state')).rejects.toThrow('bad token')
 })
 
-test('a network failure names the base that was tried', async () => {
+test('a network failure says so plainly and never prints the token-bearing URL', async () => {
   vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('failed to fetch')))
-  await expect(get('/api/state')).rejects.toThrow('http://127.0.0.1:9999')
+  await expect(get('/api/state')).rejects.toThrow('cannot reach the server')
+  await expect(get('/api/state')).rejects.not.toThrow('127.0.0.1')
+})
+
+test('an error status leads with its code, so a refusal is not mistaken for an outage', async () => {
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue(
+    new Response('{"error":"bad token"}', { status: 401, headers: { 'content-type': 'application/json' } }),
+  ))
+  await expect(get('/api/state')).rejects.toThrow('401: bad token')
 })

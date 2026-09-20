@@ -13,6 +13,12 @@ export function apiBase() {
   return base
 }
 
+/// The status always leads: "the server said no" and "the server is not there" are different
+/// problems, and a bare message makes them look the same.
+function fail(res: Response, parsed: Record<string, unknown>): string {
+  return `${res.status}: ${(parsed.error as string) || res.statusText || 'request failed'}`
+}
+
 async function call<T>(method: string, path: string, body?: unknown): Promise<T> {
   const url = `${base}${path}`
   let res: Response
@@ -23,13 +29,13 @@ async function call<T>(method: string, path: string, body?: unknown): Promise<T>
       body: body === undefined ? undefined : JSON.stringify(body),
     })
   } catch {
-    // Name the host that failed: with a remote server this is the difference between a useful
-    // error and a spinner that never resolves.
-    throw new Error(`cannot reach ${base}`)
+    // No status exists here: fetch rejected before any reply. Printing the address would put a
+    // token-bearing URL on the splash, and it tells a user nothing they can act on.
+    throw new Error('cannot reach the server')
   }
   const text = await res.text()
   const parsed = text ? (JSON.parse(text) as Record<string, unknown>) : {}
-  if (!res.ok) throw new Error((parsed.error as string) || `${res.status}`)
+  if (!res.ok) throw new Error(fail(res, parsed))
   return parsed as T
 }
 
@@ -46,11 +52,13 @@ export async function postFile<T>(path: string, file: ArrayBuffer): Promise<T> {
       body: file,
     })
   } catch {
-    throw new Error(`cannot reach ${base}`)
+    // No status exists here: fetch rejected before any reply. Printing the address would put a
+    // token-bearing URL on the splash, and it tells a user nothing they can act on.
+    throw new Error('cannot reach the server')
   }
   const text = await res.text()
   const parsed = text ? (JSON.parse(text) as Record<string, unknown>) : {}
-  if (!res.ok) throw new Error((parsed.error as string) || `${res.status}`)
+  if (!res.ok) throw new Error(fail(res, parsed))
   return parsed as T
 }
 

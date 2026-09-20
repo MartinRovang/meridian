@@ -1,4 +1,3 @@
-import { apiBase } from './api'
 import type { Step } from './store'
 // 2x the 148px it renders at. assets/logo.png is the 1254px original, kept for
 // `cargo tauri icon`; shipping it here would put 2.3 MB in the bundle for a thumbnail.
@@ -8,13 +7,6 @@ import logo from '../assets/logo-splash.png'
 // progress fill with a percentage, and one step line that shimmers while it runs. Unlike
 // gitdashy's, this is a component in the app bundle, so the Nocturne tokens have already loaded
 // and the palette comes from them rather than being hardcoded.
-// A connection error already names the base; anything else (a bad token, a 500) does not, and
-// without the address you cannot tell which server refused you.
-function withAddress(error: string): string {
-  const at = apiBase() || 'no API address'
-  return error.includes(at) ? error : `${error} (from ${at})`
-}
-
 export function Splash({ steps, error }: { steps: Step[]; error: string }) {
   const done = steps.filter((s) => s.done).length
   const pct = Math.round((done / steps.length) * 100)
@@ -38,7 +30,7 @@ export function Splash({ steps, error }: { steps: Step[]; error: string }) {
           <span className="splash-pct">{String(pct).padStart(3, '0')}</span>
         </div>
         <p className={`splash-steps${finished ? ' ok' : ''}`}>{current?.label ?? 'Ready'}</p>
-        <p className="splash-err">{error ? withAddress(error) : ''}</p>
+        <p className="splash-err">{error}</p>
       </div>
     </div>
   )
