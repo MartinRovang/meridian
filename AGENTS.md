@@ -295,6 +295,13 @@ far as any one of them, so sharing one number would mean the portfolio rule
 never fired. Its message names the portfolio and the percentage, and nothing
 else, for the same reason every other message does.
 
+**Quiet hours suppress the send and leave the remembered state alone.** A rule
+that starts firing at two in the morning is still news at seven, and buzzes once
+then. Writing the state during the quiet window would swallow it instead. The
+window wraps past midnight, and an empty one (both hours equal, which is what an
+older store carries) silences nothing. The hour is the clock on the machine
+running the server, not the user's.
+
 `evaluate` is a pure function over the views and drift rows the Dashboard
 already computes, so every rule is testable without a network or a clock. Only
 `notify` touches the wire.

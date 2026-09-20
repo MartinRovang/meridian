@@ -13,6 +13,8 @@ type Config = {
   big_move_pct: number
   portfolio_move: boolean
   portfolio_move_pct: number
+  quiet_from: number
+  quiet_to: number
   stale: boolean
   levels: Level[]
 }
@@ -197,6 +199,46 @@ export function Alerts() {
             </span>
           </label>
         </div>
+      </section>
+
+      <section className="panel">
+        <div className="panel-head">Quiet hours</div>
+        <div className="shock-inputs">
+          <label>
+            <span className="text-muted">Stay quiet from</span>
+            <input
+              className="input num"
+              type="number"
+              min={0}
+              max={23}
+              value={cfg.quiet_from}
+              onChange={(e) => set({ quiet_from: Number(e.target.value) })}
+            />
+            <span className="text-muted">to</span>
+            <input
+              className="input num"
+              type="number"
+              min={0}
+              max={23}
+              value={cfg.quiet_to}
+              onChange={(e) => set({ quiet_to: Number(e.target.value) })}
+            />
+            <span className="text-muted">o&apos;clock</span>
+          </label>
+          <button className="btn btn-secondary" onClick={() => set({ quiet_from: 22, quiet_to: 7 })}>
+            22 to 7
+          </button>
+          <button className="btn btn-ghost" onClick={() => set({ quiet_from: 0, quiet_to: 0 })}>
+            No quiet hours
+          </button>
+        </div>
+        <p className="text-muted">
+          {cfg.quiet_from === cfg.quiet_to
+            ? 'Nothing is silenced: alerts can reach you at any hour.'
+            : `Nothing is sent between ${cfg.quiet_from}:00 and ${cfg.quiet_to}:00, by the clock on the machine running the server.`}{' '}
+          A rule that starts being true during the quiet window is not lost: it is not marked as
+          seen either, so it buzzes once when the window ends.
+        </p>
       </section>
 
       <section className="panel">

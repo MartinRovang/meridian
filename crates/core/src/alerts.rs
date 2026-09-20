@@ -52,6 +52,9 @@ pub struct Alerts {
     pub big_move_pct: f64,
     pub portfolio_move: bool,
     pub portfolio_move_pct: f64,
+    /// Hours of the local day between which nothing is sent. Equal hours mean no quiet window.
+    pub quiet_from: u32,
+    pub quiet_to: u32,
     pub stale: bool,
     pub levels: Vec<Level>,
 }
@@ -76,6 +79,22 @@ impl Alerts {
             self.portfolio_move_pct
         } else {
             DEFAULT_PORTFOLIO_MOVE_PCT
+        }
+    }
+    /// Whether `hour` (0 to 23, local) falls inside the quiet window.
+    ///
+    /// The window wraps: 22 to 7 is the night, not an empty range. Equal hours mean no window at
+    /// all rather than a whole silent day, because that is what an untouched pair of zeros means
+    /// in a store written before this existed.
+    pub fn quiet_at(&self, hour: u32) -> bool {
+        let (from, to) = (self.quiet_from % 24, self.quiet_to % 24);
+        if from == to {
+            return false;
+        }
+        if from < to {
+            hour >= from && hour < to
+        } else {
+            hour >= from || hour < to
         }
     }
     /// Configured well enough to send anything at all.
@@ -422,6 +441,34 @@ mod tests {
         let fired = evaluate(&c, &v, &HashMap::new(), 0);
         assert_eq!(fired.len(), 1, "{fired:?}");
         assert_eq!(fired[0].key, "unpriced:h_XNAS.DE");
+    }
+
+    #[test]
+    fn the_quiet_window_wraps_past_midnight_and_an_empty_one_is_no_window() {
+        // Night is 22 to 7, which is not a range a naive comparison gets right, and the stale
+        // price rule is exactly the one that would otherwise buzz at three in the morning.
+        let mut c = cfg();
+        c.quiet_from = 22;
+        c.quiet_to = 7;
+        for h in [22, 23, 0, 3, 6] {
+            assert!(c.quiet_at(h), "{h} is the night");
+        }
+        for h in [7, 12, 21] {
+            assert!(!c.quiet_at(h), "{h} is not");
+        }
+
+        // A daytime window is the ordinary case and must still work.
+        c.quiet_from = 9;
+        c.quiet_to = 17;
+        assert!(c.quiet_at(9) && c.quiet_at(16) && !c.quiet_at(17) && !c.quiet_at(8));
+
+        // Both zero is what a store written before this field existed carries. It must mean
+        // "no quiet window", not "silent for ever".
+        c.quiet_from = 0;
+        c.quiet_to = 0;
+        for h in 0..24 {
+            assert!(!c.quiet_at(h), "an empty window silences nothing");
+        }
     }
 
     #[test]

@@ -13,6 +13,7 @@ use std::io::Read;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use chrono::Timelike;
 use serde_json::{json, Value};
 use tiny_http::{Header, Method, Request, Response, Server};
 
@@ -680,6 +681,13 @@ fn write_rules(ctx: &Ctx, b: &Value) -> Out {
 fn run_alerts(ctx: &Ctx) -> Result<usize, Fail> {
     let (cfg, firing) = current_firings(ctx)?;
     if !cfg.live() {
+        return Ok(0);
+    }
+    // Quiet hours suppress the send and leave the remembered state alone, so a rule that starts
+    // firing at two in the morning is still news at seven and buzzes once then. Writing the state
+    // here would swallow it instead.
+    let hour = chrono::Local::now().hour();
+    if cfg.quiet_at(hour) {
         return Ok(0);
     }
     let (fresh, keys) = alerts::newly_firing(&firing, &load_firing(ctx));
@@ -1529,6 +1537,10 @@ mod tests {
             back["portfolio_move_pct"],
             meridian_core::alerts::DEFAULT_PORTFOLIO_MOVE_PCT
         );
+        // Quiet hours round-trip, and an untouched pair stays a pair of zeros, which the
+        // evaluator reads as no window rather than as a silent day.
+        assert_eq!(back["quiet_from"], 0);
+        assert_eq!(back["quiet_to"], 0);
 
         // A slash would post to a different topic than the one the screen displays.
         let (bad, _) = call(
