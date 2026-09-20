@@ -82,13 +82,14 @@ const LAST: &[&str] = &[
 /// use. A full charset detector would be a dependency to guess at files that announce themselves.
 fn decode(bytes: &[u8]) -> String {
     let utf16 = |chunks: &[u8], le: bool| -> String {
-        let units: Vec<u16> = chunks
-            .chunks_exact(2)
+        let (pairs, _odd) = chunks.as_chunks::<2>();
+        let units: Vec<u16> = pairs
+            .iter()
             .map(|c| {
                 if le {
-                    u16::from_le_bytes([c[0], c[1]])
+                    u16::from_le_bytes(*c)
                 } else {
-                    u16::from_be_bytes([c[0], c[1]])
+                    u16::from_be_bytes(*c)
                 }
             })
             .collect();
