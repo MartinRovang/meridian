@@ -76,3 +76,57 @@ mod tests {
         assert!(map(&[], |_: &str| 1).is_empty());
     }
 }
+
+/// The item scoring highest, evaluated across the worker pool.
+///
+/// Ties go to the lowest index, so the answer does not depend on which thread finished first. A
+/// search that returns a different basket every run is not reproducible and cannot be argued with.
+pub fn best_of<T, R, F>(items: &[T], f: F) -> Option<R>
+where
+    T: Sync,
+    R: Send,
+    F: Fn(&T) -> (f64, R) + Sync,
+{
+    let next = AtomicUsize::new(0);
+    let best: Mutex<Option<(f64, usize, R)>> = Mutex::new(None);
+    std::thread::scope(|sc| {
+        for _ in 0..items.len().clamp(1, MAX_PARALLEL) {
+            sc.spawn(|| loop {
+                let i = next.fetch_add(1, Ordering::Relaxed);
+                let Some(item) = items.get(i) else { return };
+                let (score, got) = f(item);
+                let mut cur = best.lock().expect("best_of lock");
+                let better = match cur.as_ref() {
+                    None => true,
+                    Some((s, at, _)) => score > *s || (score == *s && i < *at),
+                };
+                if better {
+                    *cur = Some((score, i, got));
+                }
+            });
+        }
+    });
+    best.into_inner()
+        .expect("best_of lock")
+        .map(|(_, _, got)| got)
+}
+
+#[cfg(test)]
+mod best_of_tests {
+    #[test]
+    fn the_winner_does_not_depend_on_which_thread_got_there_first() {
+        // Two items tie for the best score. Whichever thread finishes first, the lower index must
+        // win, or the same search returns a different basket on every run.
+        let items: Vec<usize> = (0..500).collect();
+        let score = |i: &usize| {
+            if *i == 7 || *i == 400 {
+                (1.0, *i)
+            } else {
+                (0.0, *i)
+            }
+        };
+        for _ in 0..20 {
+            assert_eq!(super::best_of(&items, score), Some(7));
+        }
+    }
+}

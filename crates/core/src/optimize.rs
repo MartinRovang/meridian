@@ -113,11 +113,42 @@ pub fn build(
     histories: &HashMap<String, Series>,
     fx: &HashMap<String, Series>,
 ) -> (Matrix, Vec<String>) {
+    build_since(want, base, histories, fx, "")
+}
+
+/// The same, restricted to days on or after `since`.
+///
+/// The window has to be chosen before the symbols are, not after. Intersecting first means one
+/// company that listed last year truncates every other symbol to last year, and a search over
+/// "five years" quietly becomes a search over one. Here a symbol that does not reach back to the
+/// start of the window is excluded and named, and the window survives.
+pub fn build_since(
+    want: &[String],
+    base: &str,
+    histories: &HashMap<String, Series>,
+    fx: &HashMap<String, Series>,
+    since: &str,
+) -> (Matrix, Vec<String>) {
     let mut excluded = Vec::new();
     let mut prices: Vec<(String, BTreeMap<String, f64>)> = Vec::new();
     for sym in want {
-        match histories.get(sym).and_then(|s| in_base(s, base, fx)) {
-            Some(p) if p.len() > MIN_OBS => prices.push((sym.clone(), p)),
+        let got = histories.get(sym).and_then(|s| in_base(s, base, fx));
+        let reaches_back = |p: &BTreeMap<String, f64>| {
+            since.is_empty() || p.keys().next().is_some_and(|d| d.as_str() <= since)
+        };
+        match got {
+            Some(p) if p.len() > MIN_OBS && reaches_back(&p) => {
+                let p = if since.is_empty() {
+                    p
+                } else {
+                    p.into_iter().filter(|(d, _)| d.as_str() >= since).collect()
+                };
+                if p.len() > MIN_OBS {
+                    prices.push((sym.clone(), p));
+                } else {
+                    excluded.push(sym.clone());
+                }
+            }
             _ => excluded.push(sym.clone()),
         }
     }
@@ -255,7 +286,7 @@ fn normalise(v: Vec<f64>) -> Vec<f64> {
 
 /// Euclidean projection onto the probability simplex: the nearest point that is non-negative and
 /// sums to one. The sorting method, which is exact rather than iterative.
-fn project(v: &[f64]) -> Vec<f64> {
+pub fn project_simplex(v: &[f64]) -> Vec<f64> {
     let n = v.len();
     if n == 0 {
         return Vec::new();
@@ -302,11 +333,14 @@ pub fn min_variance(cov: &[Vec<f64>]) -> Vec<f64> {
     }
     let step = 1.0 / (2.0 * l);
     let mut w = vec![1.0 / n as f64; n];
-    for _ in 0..20_000 {
+    // ponytail: 2000 iterations and a relative tolerance. For the handful of assets a basket
+    // holds this converges in tens; the cap only bites on a covariance so degenerate that every
+    // answer on the simplex is as good as the next.
+    for _ in 0..2_000 {
         let grad: Vec<f64> = (0..n)
             .map(|i| 2.0 * (0..n).map(|j| cov[i][j] * w[j]).sum::<f64>())
             .collect();
-        let next = project(&(0..n).map(|i| w[i] - step * grad[i]).collect::<Vec<f64>>());
+        let next = project_simplex(&(0..n).map(|i| w[i] - step * grad[i]).collect::<Vec<f64>>());
         let moved: f64 = (0..n).map(|i| (next[i] - w[i]).abs()).sum();
         w = next;
         if moved < 1e-12 {

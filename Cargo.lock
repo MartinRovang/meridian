@@ -2188,7 +2188,7 @@ dependencies = [
 
 [[package]]
 name = "meridian"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "clap",
  "meridian-core",
@@ -2204,7 +2204,7 @@ dependencies = [
 
 [[package]]
 name = "meridian-core"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2220,9 +2220,10 @@ dependencies = [
 
 [[package]]
 name = "meridian-server"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "clap",
  "getrandom 0.3.4",
  "meridian-core",

@@ -167,6 +167,45 @@ Two rules the arithmetic must keep:
 Applying an optimizer's proposal must not be able to touch a share count or a
 cost basis, whatever the payload says.
 
+## Discovering a basket
+
+`crates/core/src/discover.rs` searches a market for N stocks. The arithmetic is
+the easy part; the selection is where this screen could become the one dishonest
+thing in the app, so three rules are load-bearing.
+
+**Selection never reads the test window.** The window splits seven tenths to
+training, a five-day gap, then the rest. The pre-filter, the weights and the
+winner all see only the training rows. The test rows are read once, after the
+basket is frozen. Lux's `find_best_n_stocks` picks the combination with the
+highest test-window Sharpe, which spends the holdout on the search: the reported
+out-of-sample figure is then the maximum of a hundred thousand draws, and it is
+a better explanation of its 3.84 Sharpe than the look-ahead and cost issues its
+own summary fixes. Do not reintroduce that.
+
+**Equal weight is always reported.** The same N names, equally weighted, over
+the same held-out window, after the same costs. When the optimiser loses to it
+the screen says so in a callout above the numbers. On Oslo with five stocks it
+does lose: 26.6% against 34.9%. Maximum Sharpe triples the in-sample figure to
+214% and still loses out of sample, which is the clearest demonstration of
+overfitting the app can offer.
+
+**Quarterly, drifting, after costs.** Weights drift between rebalances and are
+restored every 63 trading days, with costs charged on `rate * sum(|delta w|)`.
+Holding weights constant would be a daily rebalance in disguise and would
+collect a premium nobody can capture.
+
+The search is exhaustive while `C(K, N)` is at or under 200,000 and greedy above
+it, and the screen states which ran. Two performance rules keep the exhaustive
+case usable: the covariance over a subset is a submatrix of the covariance over
+all candidates, so it is computed once and sliced, and the solver's iteration
+cap is sized for the handful of assets in a basket. Rebuilding the covariance
+per combination took 124 seconds for 142,506 baskets; slicing it takes 8.
+
+`crates/core/src/universe.rs` is the shipped list: Oslo's main board by
+turnover from a Euronext export, plus Stockholm and Copenhagen large caps by
+hand, since Euronext carries neither. A stale entry is visible rather than
+silent: a delisted symbol has no usable history and is named on the screen.
+
 ## Caching quotes
 
 The cache is a `HashMap<String, Quote>` behind a mutex, mirrored to

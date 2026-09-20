@@ -38,7 +38,7 @@ impl Series {
 }
 
 /// Unix seconds to a UTC calendar day.
-fn day(ts: i64) -> String {
+pub fn day(ts: i64) -> String {
     chrono::DateTime::from_timestamp(ts, 0)
         .unwrap_or_default()
         .format("%Y-%m-%d")

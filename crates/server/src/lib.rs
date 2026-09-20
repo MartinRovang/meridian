@@ -16,7 +16,7 @@ use serde_json::{json, Value};
 use tiny_http::{Header, Method, Request, Response, Server};
 
 use meridian_core::config::Config;
-use meridian_core::{calc, history, import, optimize, quotes, store};
+use meridian_core::{calc, discover, history, import, optimize, quotes, store, universe};
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -524,6 +524,44 @@ fn set_targets(ctx: &Ctx, b: &Value) -> Out {
     Ok(json!({ "written": by_id.len() }))
 }
 
+/// Search a market for a basket of n, choosing on the earlier part of the window only.
+///
+/// The first call for a market fetches a history per listing, which is slow and then cached.
+/// Everything after that is arithmetic.
+fn discover_route(ctx: &Ctx, q: &HashMap<String, String>) -> Out {
+    let s = load(ctx)?;
+    let market = q.get("market").map(String::as_str).unwrap_or("");
+    let n: usize = q.get("n").and_then(|x| x.parse().ok()).unwrap_or(5);
+    let top_k: usize = q.get("top_k").and_then(|x| x.parse().ok()).unwrap_or(30);
+    let cost_bps: f64 = q
+        .get("cost_bps")
+        .and_then(|x| x.parse().ok())
+        .unwrap_or(discover::COST_BPS);
+    let method = q.get("method").map(String::as_str).unwrap_or("minvar");
+    let years: f64 = q.get("years").and_then(|x| x.parse().ok()).unwrap_or(5.0);
+    if !(2.0..=10.0).contains(&years) {
+        return Err(Fail::new(400, "years must be between 2 and 10"));
+    }
+    if !(1..=12).contains(&n) {
+        return Err(Fail::new(400, "n must be between 1 and 12"));
+    }
+    if !(0.0..=500.0).contains(&cost_bps) {
+        return Err(Fail::new(400, "cost_bps must be between 0 and 500"));
+    }
+
+    let listed = universe::in_market(market);
+    if listed.is_empty() {
+        return Err(Fail::new(404, "no such market"));
+    }
+    let (loaded, fx) = histories_for(ctx, &listed, &s.base_currency);
+    // Calendar days, not trading days: this is a date to compare bar labels against, and 365.25
+    // keeps a five-year window from drifting a day per leap year.
+    let since = history::day(chrono::Utc::now().timestamp() - (years * 365.25 * 86_400.0) as i64);
+    let (m, unusable) = optimize::build_since(&listed, &s.base_currency, &loaded, &fx, &since);
+    let out = discover::search(&m, unusable, listed.len(), n, method, top_k, cost_bps);
+    serde_json::to_value(&out).map_err(|e| Fail::new(500, e.to_string()))
+}
+
 /// What today's allocation would have done, day by day.
 ///
 /// Histories are fetched once and kept: daily bars change once a day, so a chart drawn twice in a
@@ -780,6 +818,8 @@ fn handle(ctx: &Ctx, token: &str, req: Request) {
     let out: Out = match (req.method().as_str(), path.as_str()) {
         ("GET", "/api/state") => state(ctx),
         ("GET", "/api/search") => search(ctx, query.get("q").map(String::as_str).unwrap_or("")),
+        ("GET", "/api/markets") => Ok(json!({ "markets": universe::MARKETS })),
+        ("GET", "/api/discover") => discover_route(ctx, &query),
         ("GET", "/api/optimize") => optimize_route(
             ctx,
             query.get("portfolio").map(String::as_str).unwrap_or(""),
