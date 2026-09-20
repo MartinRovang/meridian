@@ -1,6 +1,8 @@
 import { apiBase } from './api'
 import type { Step } from './store'
-import logo from '../assets/logo.png'
+// 2x the 148px it renders at. assets/logo.png is the 1254px original, kept for
+// `cargo tauri icon`; shipping it here would put 2.3 MB in the bundle for a thumbnail.
+import logo from '../assets/logo-splash.png'
 
 // Ported from gitdashy's src-tauri/ui/splashscreen.html: the artwork, the wordmark, a striped
 // progress fill with a percentage, and one step line that shimmers while it runs. Unlike
