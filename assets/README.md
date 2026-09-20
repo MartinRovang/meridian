@@ -6,3 +6,13 @@
 
 Both are currently placeholders. Drop the real artwork in at these exact paths;
 nothing else needs to change.
+
+When `logo.png` is replaced, regenerate the desktop icon set from it:
+
+```bash
+cargo tauri icon assets/logo.png
+rm -rf src-tauri/icons/android src-tauri/icons/ios src-tauri/icons/Square*.png src-tauri/icons/StoreLogo.png
+```
+
+The second line drops the mobile and Windows-Store sizes the CLI also emits;
+nothing in `tauri.conf.json` references them.

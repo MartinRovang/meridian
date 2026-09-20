@@ -1,0 +1,18 @@
+[package]
+name = "meridian"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Portfolio management and surveillance"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+meridian-core = { path = "../crates/core" }
+meridian-server = { path = "../crates/server" }
+clap.workspace = true
+tauri = { version = "2", features = [] }
+tauri-plugin-single-instance = "2"
+urlencoding.workspace = true
