@@ -1,8 +1,9 @@
 import { useEffect, useState } from 'react'
-import { get } from '../api'
+import { get, post } from '../api'
 import { SkelScreen, SkelTrades } from '../Skeleton'
 import { money, pct, signed } from '../format'
 import { useApp } from '../store'
+import { ask } from '../Confirm'
 
 type Trade = {
   id: string; ticker: string; name: string
@@ -12,9 +13,11 @@ type Trade = {
 const DEBOUNCE_MS = 300
 
 export function Rebalance() {
-  const { state, pid, setScreen } = useApp()
+  const { state, pid, setScreen, load } = useApp()
   const [cash, setCash] = useState('0')
   const [trades, setTrades] = useState<Trade[] | null>(null)
+  // What the whole-share trades cannot use, computed by the server with the trades.
+  const [leftover, setLeftover] = useState(0)
   // A refusal is a state of its own, not an empty list: an empty list reads as "nothing to do",
   // which is the opposite of what a 409 means.
   const [refused, setRefused] = useState('')
@@ -26,11 +29,12 @@ export function Rebalance() {
     if (!id) return
     const t = setTimeout(() => {
       const n = Number(cash)
-      get<{ trades: Trade[] }>(
+      get<{ trades: Trade[]; leftover: number }>(
         `/api/trades?portfolio=${encodeURIComponent(id)}&cash=${Number.isFinite(n) ? n : 0}`,
       )
         .then((r) => {
           setTrades(r.trades)
+          setLeftover(r.leftover)
           setRefused('')
         })
         .catch((e: unknown) => {
@@ -43,6 +47,25 @@ export function Rebalance() {
 
   if (!state) return <SkelScreen />
   if (!p) return <p className="text-muted">No portfolios yet.</p>
+
+  const apply = async () => {
+    const n = Number(cash)
+    const what = n > 0 ? `the buys for ${money(n, state.base_currency)}` : 'these trades'
+    const ok = await ask(
+      `Add to "${p.name}"?`,
+      `This adds ${what} to the portfolio. Share counts and cost basis are updated.`,
+      'Add to portfolio',
+    )
+    if (!ok) return
+    // The server works the trades out again from the same cash rather than taking this list, so
+    // what is written is what a rebalance would do, at the prices it has now.
+    post('/api/trades/apply', { portfolio: p.id, cash: Number.isFinite(n) ? n : 0 })
+      .then(() => {
+        setCash('0')
+        return load()
+      })
+      .catch((e: unknown) => setRefused(e instanceof Error ? e.message : String(e)))
+  }
 
   const rows = state.drift.find((d) => d.id === p.id)?.rows ?? []
   const base = state.base_currency
@@ -97,12 +120,22 @@ export function Rebalance() {
       </table>
 
       <section className="panel">
-        <div className="panel-head">Proposed trades</div>
+        <div className="panel-head with-action">
+          Proposed trades
+          {trades?.length && !refused ? (
+            <button className="btn btn-primary" onClick={() => void apply()}>
+              Add to portfolio
+            </button>
+          ) : null}
+        </div>
         {refused ? (
           <div className="refusal">
             <i className="ph ph-warning-diamond" />
             <div>
               <div>{refused}</div>
+              {/* Only the targets refusal is fixed in Builder; an empty portfolio is fixed by the
+                  cash box above, and the message says so itself. */}
+              {refused.includes('target') ? (
               <div className="text-muted">
                 Rebalancing needs targets that add up.{' '}
                 <a href="#builder" onClick={() => setScreen('builder')}>
@@ -110,13 +143,19 @@ export function Rebalance() {
                 </a>
                 .
               </div>
+              ) : null}
             </div>
           </div>
         ) : trades === null ? (
           <SkelTrades />
         ) : trades.length === 0 ? (
-          <p className="text-muted">Nothing to do: every holding is within its band.</p>
+          <p className="text-muted">
+            {Number(cash) > 0
+              ? 'The cash does not buy a whole share of anything below its target.'
+              : 'Nothing to do: every holding is within its band.'}
+          </p>
         ) : (
+          <>
           <div className="legend">
             {trades.map((t) => (
               <div key={t.id} className="trade">
@@ -124,7 +163,8 @@ export function Rebalance() {
                 <span className={t.side === 'buy' ? 'up' : 'down'}>
                   {t.side === 'buy' ? 'Buy' : 'Sell'}
                 </span>
-                <span className="num">{t.shares.toFixed(2)}</span>
+                {/* Whole shares, except selling out of a fractional position an import brought. */}
+                <span className="num">{t.shares}</span>
                 <span className="legend-name">
                   {t.ticker} <span className="text-muted">{t.name}</span>
                 </span>
@@ -132,6 +172,11 @@ export function Rebalance() {
               </div>
             ))}
           </div>
+          <p className="text-muted">
+            About {money(leftover, base)} left over: whole shares only, so buys round down and
+            sells round up.
+          </p>
+          </>
         )}
       </section>
     </div>

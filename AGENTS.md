@@ -398,6 +398,26 @@ configuration does. `GET /api/rules/hits` is the screen's own view and does not
 care whether alerts are configured: a rule is something to look at first and a
 notification second.
 
+## What has changed
+
+`crates/core/src/outliers.rs`, drawn by `screens/Outliers.tsx` under the chart on the
+Dashboard. Two questions over the same base-currency daily returns.
+
+**Each holding against its own past, never against the others.** The last 63 trading days
+against the 252 before them: volatility 1.5x or two thirds of its own, a correlation with the rest
+of the portfolio (weighted as held) that moved 0.3, or a one- or five-day move 3 of its own
+deviations out. A shipping stock that swings 3% a day is not an outlier for doing so.
+
+A holding without 315 returns is named and left out, and it is checked alone first: the matrix
+keeps only shared days, so one recent listing would otherwise cut every other baseline short.
+
+**Grouping is hierarchical clustering on correlation, not a projection.** Average linkage,
+stopped at 0.5, ties to the lower index, so the same holdings always group the same way and each
+group comes with the correlation that put it there. UMAP was considered and rejected: on five
+points any layout looks meaningful, it is stochastic, and its axes cannot be explained.
+
+The same caveat as every history screen: today's holdings priced back through time.
+
 ## Caching quotes
 
 The cache is a `HashMap<String, Quote>` behind a mutex, mirrored to

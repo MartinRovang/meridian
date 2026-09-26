@@ -19,7 +19,8 @@ use tiny_http::{Header, Method, Request, Response, Server};
 
 use meridian_core::config::Config;
 use meridian_core::{
-    alerts, calc, discover, energy, history, import, optimize, quotes, rules, store, universe,
+    alerts, calc, discover, energy, history, import, optimize, outliers, quotes, rules, store,
+    universe,
 };
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -405,11 +406,32 @@ fn trades(ctx: &Ctx, pid: &str, cash: f64) -> Out {
     let cache = ctx.cache.lock().expect("cache lock").clone();
     let v = calc::view_portfolio(p, &s.base_currency, &cache);
     match calc::trades(&v, cash) {
-        Ok(t) => Ok(json!({ "trades": t })),
+        Ok(t) => Ok(json!({ "leftover": calc::leftover(&t, cash), "trades": t })),
         // 409: the request is well formed, the portfolio is not ready for it. The page shows this
         // message verbatim, so it must read as a sentence.
         Err(e) => Err(Fail::new(409, e.to_string())),
     }
+}
+
+/// Carry out a rebalance in the store: the same trades `GET /api/trades` shows, worked out again
+/// here from the same cash rather than taken from the payload, so a request can move shares only
+/// by what a rebalance would.
+fn apply_trades(ctx: &Ctx, b: &Value) -> Out {
+    let pid = b.get("portfolio").and_then(|x| x.as_str()).unwrap_or("");
+    let cash = b.get("cash").and_then(Value::as_f64).unwrap_or(0.0);
+    let mut s = load(ctx)?;
+    let base = s.base_currency.clone();
+    let cache = ctx.cache.lock().expect("cache lock").clone();
+    let p = s
+        .portfolios
+        .iter_mut()
+        .find(|p| p.id == pid)
+        .ok_or_else(|| Fail::new(404, "no such portfolio"))?;
+    let v = calc::view_portfolio(p, &base, &cache);
+    let t = calc::trades(&v, cash).map_err(|e| Fail::new(409, e.to_string()))?;
+    calc::apply_trades(p, &t, &cache).map_err(|e| Fail::new(409, e))?;
+    commit(ctx, &s)?;
+    Ok(json!({ "leftover": calc::leftover(&t, cash), "trades": t }))
 }
 
 /// Daily bars for a set of symbols, plus the fx series they need, fetching only what is stale.
@@ -511,12 +533,57 @@ fn optimize_route(ctx: &Ctx, pid: &str, method: &str) -> Out {
     serde_json::to_value(&out).map_err(|e| Fail::new(500, e.to_string()))
 }
 
+/// What has changed about each holding against its own past year, and which holdings move
+/// together. Weighted by current value, so "the rest of the portfolio" is the portfolio as held.
+fn outliers_route(ctx: &Ctx, pid: &str) -> Out {
+    let s = load(ctx)?;
+    let p = s
+        .portfolios
+        .iter()
+        .find(|p| p.id == pid)
+        .ok_or_else(|| Fail::new(404, "no such portfolio"))?;
+    let mut wanted: Vec<String> = p.holdings.iter().map(|h| h.ticker.clone()).collect();
+    wanted.sort();
+    wanted.dedup();
+    let cache = ctx.cache.lock().expect("cache lock").clone();
+    let weights = calc::view_portfolio(p, &s.base_currency, &cache)
+        .holdings
+        .into_iter()
+        .filter(|h| h.priced)
+        .map(|h| (h.ticker, h.weight_pct))
+        .collect();
+    let (loaded, fx) = histories_for(ctx, &wanted, &s.base_currency);
+    let out = outliers::analyse(&wanted, &weights, &s.base_currency, &loaded, &fx);
+    serde_json::to_value(&out).map_err(|e| Fail::new(500, e.to_string()))
+}
+
 /// Write target weights, and nothing else.
 ///
 /// Deliberately not part of the holding endpoint: applying an optimizer's proposal must not be
 /// able to touch a share count or a cost basis, whatever the payload says.
+///
+/// `{"portfolio": id, "equal": true}` gives every holding the same share instead, so the split
+/// is computed here rather than in the Builder.
 fn set_targets(ctx: &Ctx, b: &Value) -> Out {
     let pid = b.get("portfolio").and_then(|x| x.as_str()).unwrap_or("");
+    if b.get("equal").and_then(Value::as_bool) == Some(true) {
+        let mut s = load(ctx)?;
+        let p = s
+            .portfolios
+            .iter_mut()
+            .find(|p| p.id == pid)
+            .ok_or_else(|| Fail::new(404, "no such portfolio"))?;
+        if p.holdings.is_empty() {
+            return Err(Fail::new(400, "the portfolio has no holdings to weight"));
+        }
+        let each = 100.0 / p.holdings.len() as f64;
+        for h in &mut p.holdings {
+            h.target_pct = each;
+        }
+        let n = p.holdings.len();
+        commit(ctx, &s)?;
+        return Ok(json!({ "written": n }));
+    }
     let targets = b
         .get("targets")
         .and_then(|x| x.as_array())
@@ -778,8 +845,10 @@ fn discover_route(ctx: &Ctx, q: &HashMap<String, String>) -> Out {
         .unwrap_or(discover::COST_BPS);
     let method = q.get("method").map(String::as_str).unwrap_or("minvar");
     let years: f64 = q.get("years").and_then(|x| x.parse().ok()).unwrap_or(5.0);
-    if !(2.0..=10.0).contains(&years) {
-        return Err(Fail::new(400, "years must be between 2 and 10"));
+    // Five is the ceiling because five years is all `history` fetches: a longer window would find
+    // no listing that reaches back that far, and report every one of them unusable.
+    if !(2.0..=5.0).contains(&years) {
+        return Err(Fail::new(400, "years must be between 2 and 5"));
     }
     let horizon: f64 = q.get("horizon").and_then(|x| x.parse().ok()).unwrap_or(1.0);
     if !(0.25..=2.0).contains(&horizon) {
@@ -1099,6 +1168,10 @@ fn handle(ctx: &Ctx, token: &str, req: Request) {
             query.get("portfolio").map(String::as_str).unwrap_or(""),
             query.get("benchmark").map(String::as_str).unwrap_or(""),
         ),
+        ("GET", "/api/outliers") => outliers_route(
+            ctx,
+            query.get("portfolio").map(String::as_str).unwrap_or(""),
+        ),
         ("GET", "/api/trades") => trades(
             ctx,
             query.get("portfolio").map(String::as_str).unwrap_or(""),
@@ -1112,6 +1185,7 @@ fn handle(ctx: &Ctx, token: &str, req: Request) {
         ("POST", "/api/portfolio") => body(&mut req).and_then(|b| create_portfolio(ctx, &b)),
         ("POST", "/api/holding") => body(&mut req).and_then(|b| put_holding(ctx, &b)),
         ("POST", "/api/targets") => body(&mut req).and_then(|b| set_targets(ctx, &b)),
+        ("POST", "/api/trades/apply") => body(&mut req).and_then(|b| apply_trades(ctx, &b)),
         ("POST", "/api/import/preview") => {
             let pid = query.get("portfolio").cloned().unwrap_or_default();
             raw_body(&mut req).and_then(|f| import_preview(ctx, &pid, &f))
@@ -1394,6 +1468,41 @@ mod tests {
         };
         assert_eq!(by(&a), 30.0);
         assert_eq!(by(&b), 70.0);
+    }
+
+    #[test]
+    fn equal_targets_split_a_hundred_evenly_and_touch_nothing_else() {
+        let (_d, port, t) = up();
+        let (pid, a, b) = with_two_holdings(port, &t);
+        call(
+            port,
+            "POST",
+            "/api/targets",
+            &t,
+            json!({"portfolio": pid, "targets": [
+                {"id": a, "pct": 30.0}, {"id": b, "pct": 70.0}]}),
+        );
+        let (_, before) = call(port, "GET", "/api/state", &t, Value::Null);
+        let (code, _) = call(
+            port,
+            "POST",
+            "/api/targets",
+            &t,
+            json!({"portfolio": pid, "equal": true}),
+        );
+        assert_eq!(code, 200);
+        let (_, s) = call(port, "GET", "/api/state", &t, Value::Null);
+        let old = before["portfolios"][0]["holdings"].as_array().expect("arr");
+        for (h, o) in s["portfolios"][0]["holdings"]
+            .as_array()
+            .expect("arr")
+            .iter()
+            .zip(old)
+        {
+            assert_eq!(h["target_pct"], 50.0);
+            assert_eq!(h["shares"], o["shares"]);
+            assert_eq!(h["cost_basis"], o["cost_basis"]);
+        }
     }
 
     #[test]

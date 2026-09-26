@@ -137,6 +137,24 @@ pub fn build_local(
     build_since(want, "", histories, &HashMap::new(), since)
 }
 
+/// How many calendar days after `since` a series may start and still count as covering the
+/// window. `since` is a calendar date and often a weekend or a holiday: five years back from a
+/// Saturday is a Sunday, the first bar is the Monday, and without this every listing in a market
+/// was excluded for being one day short. A week covers the longest run of closed days (Easter,
+/// Christmas) and still excludes a listing that genuinely started later.
+const START_SLACK_DAYS: i64 = 7;
+
+fn starts_by(first: &str, since: &str) -> bool {
+    use chrono::NaiveDate;
+    match (
+        NaiveDate::parse_from_str(first, "%Y-%m-%d"),
+        NaiveDate::parse_from_str(since, "%Y-%m-%d"),
+    ) {
+        (Ok(f), Ok(s)) => (f - s).num_days() <= START_SLACK_DAYS,
+        _ => first <= since,
+    }
+}
+
 /// The same, restricted to days on or after `since`.
 ///
 /// The window has to be chosen before the symbols are, not after. Intersecting first means one
@@ -155,7 +173,7 @@ pub fn build_since(
     for sym in want {
         let got = histories.get(sym).and_then(|s| in_base(s, base, fx));
         let reaches_back = |p: &BTreeMap<String, f64>| {
-            since.is_empty() || p.keys().next().is_some_and(|d| d.as_str() <= since)
+            since.is_empty() || p.keys().next().is_some_and(|d| starts_by(d, since))
         };
         match got {
             Some(p) if p.len() > MIN_OBS && reaches_back(&p) => {
@@ -615,6 +633,44 @@ mod tests {
     #[test]
     fn volatility_of_one_asset_is_its_own() {
         assert!((volatility(&diag(&[0.04]), &[1.0]) - 20.0).abs() < 1e-9);
+    }
+
+    /// `n` daily bars on consecutive calendar days from `start`.
+    fn dated(start: &str, n: usize) -> Series {
+        let d0 = chrono::NaiveDate::parse_from_str(start, "%Y-%m-%d").expect("date");
+        Series {
+            currency: "NOK".into(),
+            bars: (0..n)
+                .map(|i| Bar {
+                    day: (d0 + chrono::Days::new(i as u64))
+                        .format("%Y-%m-%d")
+                        .to_string(),
+                    close: 100.0 + (i % 7) as f64,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn a_window_starting_on_a_weekend_still_counts_the_monday_after() {
+        // Five years back from a Saturday is a Sunday; the first bar is the Monday. This excluded
+        // every listing in Discover.
+        let mut h = HashMap::new();
+        h.insert("A.OL".to_string(), dated("2021-09-27", 400));
+        h.insert("LATE.OL".to_string(), dated("2021-11-01", 400));
+        let (m, excluded) = build_since(
+            &["A.OL".to_string(), "LATE.OL".to_string()],
+            "NOK",
+            &h,
+            &HashMap::new(),
+            "2021-09-26",
+        );
+        assert_eq!(m.symbols, vec!["A.OL".to_string()]);
+        assert_eq!(
+            excluded,
+            vec!["LATE.OL".to_string()],
+            "a month late is late"
+        );
     }
 
     fn series(currency: &str, closes: &[f64]) -> Series {

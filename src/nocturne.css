@@ -2,6 +2,7 @@
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
 
 :root {
+  color-scheme: dark; /* native popups (select lists) follow the dark theme */
   --color-bg: #161826;
   --color-surface: #232532;
   --color-text: #e9e9ed;
@@ -291,3 +292,7 @@ textarea.input { min-height: 90px; resize: vertical; }
 }
 .dialog-body { font-size: 14px; opacity: 0.85; }
 .dialog-actions { display: flex; justify-content: flex-end; gap: var(--space-2); margin-top: var(--space-2); }
+
+/* WebKitGTK ignores color-scheme on the open list and draws light text on its own light
+   background; set the option colours explicitly. */
+option { background: var(--color-surface); color: var(--color-text); }

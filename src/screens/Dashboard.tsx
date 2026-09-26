@@ -5,6 +5,7 @@ import { SkelScreen } from '../Skeleton'
 import { useApp } from '../store'
 import { Donut, hue } from './Donut'
 import { Performance } from './Performance'
+import { Outliers } from './Outliers'
 
 // Gain and loss are the one thing Nocturne has no token for, so these come straight from the
 // design file's own UP and DOWN constants. Everything else on this screen is a token.
@@ -127,6 +128,8 @@ export function Dashboard() {
       </div>
 
       <Performance id={p.id} />
+
+      <Outliers id={p.id} />
 
       {p.unpriced > 0 ? (
         <p className="text-muted">

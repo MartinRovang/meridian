@@ -130,7 +130,7 @@ export function Discover() {
               className="input num"
               type="number"
               min={2}
-              max={10}
+              max={5}
               value={years}
               onChange={(e) => setYears(Number(e.target.value))}
             />

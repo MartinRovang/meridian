@@ -21,6 +21,9 @@ pub struct HoldingView {
     /// In the holding's own currency, as quoted.
     pub price: f64,
     pub currency: String,
+    /// One share in base currency. What a rebalance prices a buy at, including into a holding
+    /// with no shares yet, where value / shares has nothing to divide.
+    pub price_base: f64,
     /// In base currency.
     pub value: f64,
     pub day_pct: f64,
@@ -80,6 +83,7 @@ pub fn view_holding(h: &Holding, base: &str, cache: &Cache) -> HoldingView {
         shares: h.shares,
         price,
         currency,
+        price_base: 0.0,
         value: 0.0,
         day_pct: 0.0,
         pl: 0.0,
@@ -93,9 +97,10 @@ pub fn view_holding(h: &Holding, base: &str, cache: &Cache) -> HoldingView {
     let Some(q) = cache.get(&h.ticker) else {
         return blank(0.0, String::new());
     };
-    let Some(value) = convert(h.shares * q.price, &q.currency, base, cache) else {
+    let Some(price_base) = convert(q.price, &q.currency, base, cache) else {
         return blank(q.price, q.currency.clone());
     };
+    let value = h.shares * price_base;
     let Some(cost) = convert(h.cost_basis, &h.cost_currency, base, cache) else {
         return blank(q.price, q.currency.clone());
     };
@@ -113,6 +118,7 @@ pub fn view_holding(h: &Holding, base: &str, cache: &Cache) -> HoldingView {
         shares: h.shares,
         price: q.price,
         currency: q.currency.clone(),
+        price_base,
         value,
         day_pct,
         pl,
@@ -204,9 +210,9 @@ pub struct Trade {
     pub ticker: String,
     pub name: String,
     pub side: Side,
-    /// Fractional. Rounding to whole shares is the broker's problem and the user's judgement.
+    /// Whole shares: buys round down and sells round up, see `trades`.
     pub shares: f64,
-    /// In base currency, always positive.
+    /// In base currency, always positive: the whole shares at the current price.
     pub amount: f64,
 }
 
@@ -216,6 +222,8 @@ pub enum RebalanceError {
     TargetsDoNotSum(f64),
     #[error("no holding has a usable price")]
     NothingPriced,
+    #[error("the portfolio holds nothing yet: enter cash to deploy to buy into it")]
+    NothingHeld,
 }
 
 /// Trades smaller than this in base currency are not worth the commission.
@@ -249,13 +257,15 @@ pub fn drift(v: &PortfolioView) -> Vec<DriftRow> {
 /// What to buy and sell to land on target.
 ///
 /// With `cash` greater than zero the portfolio is rebalanced against its value PLUS that cash and
-/// only buys are returned, which is how you deploy new money without selling anything.
+/// only buys are returned, which is how you deploy new money without selling anything. That is
+/// also how a new portfolio is first bought into: every holding at zero shares, the cash split by
+/// target.
 ///
 /// ponytail: proportional, no tax lots, no wash-sale rules, no whole-share rounding, no
 /// commission model. Those belong with a broker integration, not with typed-in positions.
 pub fn trades(v: &PortfolioView, cash: f64) -> Result<Vec<Trade>, RebalanceError> {
     let priced: Vec<&HoldingView> = v.holdings.iter().filter(|h| h.priced).collect();
-    if priced.is_empty() || v.value <= 0.0 {
+    if priced.is_empty() {
         return Err(RebalanceError::NothingPriced);
     }
     let sum: f64 = priced.iter().map(|h| h.target_pct).sum();
@@ -263,6 +273,9 @@ pub fn trades(v: &PortfolioView, cash: f64) -> Result<Vec<Trade>, RebalanceError
         return Err(RebalanceError::TargetsDoNotSum(sum));
     }
     let cash = cash.max(0.0);
+    if v.value + cash <= 0.0 {
+        return Err(RebalanceError::NothingHeld);
+    }
     let pot = v.value + cash;
     let want = |h: &HoldingView| pot * h.target_pct / 100.0 - h.value;
 
@@ -289,23 +302,87 @@ pub fn trades(v: &PortfolioView, cash: f64) -> Result<Vec<Trade>, RebalanceError
             }
             delta *= scale;
         }
-        if delta.abs() < MIN_TRADE || h.shares <= 0.0 {
+        if h.price_base <= 0.0 {
             continue;
         }
-        // h.price is in the holding's own currency while h.value is in base; their ratio is the
-        // base-currency price per share, which avoids a second fx lookup and cannot disagree
-        // with the value the rest of the screen shows.
-        let per_share_base = h.value / h.shares;
+        // Whole shares. A buy rounds down, so buying never spends more than there is; a sell
+        // rounds up, capped at what is held, so the sells always raise at least what the buys
+        // cost. What neither can use is `leftover`. The epsilon keeps 5000 / 250 from flooring
+        // to 19 on a rounding error.
+        let exact = delta / h.price_base;
+        let (side, shares) = if delta > 0.0 {
+            (Side::Buy, (exact + 1e-9).floor())
+        } else {
+            (Side::Sell, (-exact - 1e-9).ceil().min(h.shares))
+        };
+        let amount = shares * h.price_base;
+        if shares <= 0.0 || amount < MIN_TRADE {
+            continue;
+        }
         out.push(Trade {
             id: h.id.clone(),
             ticker: h.ticker.clone(),
             name: h.name.clone(),
-            side: if delta > 0.0 { Side::Buy } else { Side::Sell },
-            shares: (delta / per_share_base).abs(),
-            amount: delta.abs(),
+            side,
+            shares,
+            amount,
         });
     }
     Ok(out)
+}
+
+/// Cash that is left once the trades are done: what was brought, plus what the sells raise, less
+/// what the buys cost. Never negative, because buys round down and sells round up.
+pub fn leftover(trades: &[Trade], cash: f64) -> f64 {
+    trades.iter().fold(cash.max(0.0), |left, t| match t.side {
+        Side::Buy => left - t.amount,
+        Side::Sell => left + t.amount,
+    })
+}
+
+/// Write a rebalance's trades into the portfolio: the share count moves by what was traded and
+/// the cost basis moves with it. A buy adds what it cost, converted into the holding's cost
+/// currency; a sell takes away its share of the average cost, so what is left keeps its price.
+///
+/// All or nothing: every change is worked out before any is made, and a cost currency with no
+/// rate refuses the lot rather than adding a buy at a cost of zero.
+pub fn apply_trades(p: &mut Portfolio, trades: &[Trade], cache: &Cache) -> Result<(), String> {
+    let mut changes = Vec::new();
+    for t in trades {
+        let Some(i) = p.holdings.iter().position(|h| h.id == t.id) else {
+            return Err(format!("{} is no longer in the portfolio", t.ticker));
+        };
+        let h = &p.holdings[i];
+        let (shares, cost) = match t.side {
+            Side::Buy => {
+                // Priced in the listing's own currency, which is nearly always the cost
+                // currency, rather than converted back out of base: only the rate into base is
+                // ever cached, so the reverse would be missing for every foreign holding.
+                let q = cache
+                    .get(&h.ticker)
+                    .ok_or_else(|| format!("no quote for {}", t.ticker))?;
+                let paid = convert(t.shares * q.price, &q.currency, &h.cost_currency, cache)
+                    .ok_or_else(|| {
+                        format!(
+                            "no {} to {} rate for {}",
+                            q.currency, h.cost_currency, t.ticker
+                        )
+                    })?;
+                (h.shares + t.shares, h.cost_basis + paid)
+            }
+            Side::Sell => {
+                let left = (h.shares - t.shares).max(0.0);
+                let kept = if h.shares > 0.0 { left / h.shares } else { 0.0 };
+                (left, h.cost_basis * kept)
+            }
+        };
+        changes.push((i, shares, cost));
+    }
+    for (i, shares, cost) in changes {
+        p.holdings[i].shares = shares;
+        p.holdings[i].cost_basis = cost;
+    }
+    Ok(())
 }
 
 /// One day of the allocation's history, in base currency.
@@ -739,27 +816,55 @@ mod tests {
     }
 
     #[test]
-    fn trades_move_each_holding_onto_its_target() {
-        let t = trades(&sixty_forty(50.0, 50.0, 3.0), 0.0).expect("targets sum to 100");
+    fn trades_are_whole_shares_and_the_sells_pay_for_the_buys() {
+        // 27000 NOK of EQNR and 18000 of AAPL, wanted 50/50: 4500 should move each way.
+        let p = portfolio(
+            3.0,
+            vec![
+                holding("h1", "EQNR.OL", 100.0, 0.0, "NOK", 50.0),
+                holding("h2", "AAPL", 9.0, 0.0, "USD", 50.0),
+            ],
+        );
+        let t = trades(&view_portfolio(&p, "NOK", &cache()), 0.0).expect("targets sum to 100");
         let sell = t.iter().find(|t| t.ticker == "EQNR.OL").expect("a sell");
         assert_eq!(sell.side, Side::Sell);
-        assert!(
-            (sell.amount - 450.0).abs() < 1e-6,
-            "4500 total, target 2250, held 2700"
+        assert_eq!(
+            sell.shares, 17.0,
+            "16.67 rounds up, so the sell raises enough"
         );
-        assert!((sell.shares - 450.0 / 270.0).abs() < 1e-6);
+        assert!((sell.amount - 17.0 * 270.0).abs() < 1e-9);
         let buy = t.iter().find(|t| t.ticker == "AAPL").expect("a buy");
         assert_eq!(buy.side, Side::Buy);
-        assert!((buy.amount - 450.0).abs() < 1e-6);
-        assert!(
-            (buy.shares - 450.0 / 2000.0).abs() < 1e-6,
-            "priced per share in NOK, not USD"
+        assert_eq!(buy.shares, 2.0, "2.25 rounds down, priced per share in NOK");
+        assert!((buy.amount - 4000.0).abs() < 1e-9);
+        assert!((leftover(&t, 0.0) - 590.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_sell_never_rounds_up_past_what_is_held() {
+        // Wanted at 0%: the whole 2.5 shares go, not 3.
+        let p = portfolio(
+            3.0,
+            vec![
+                holding("h1", "EQNR.OL", 2.5, 0.0, "NOK", 0.0),
+                holding("h2", "AAPL", 10.0, 0.0, "NOK", 100.0),
+            ],
         );
+        let t = trades(&view_portfolio(&p, "NOK", &cache()), 0.0).expect("trades");
+        let sell = t.iter().find(|t| t.ticker == "EQNR.OL").expect("a sell");
+        assert_eq!(sell.shares, 2.5);
+    }
+
+    #[test]
+    fn a_trade_smaller_than_one_share_is_not_proposed() {
+        // 450 NOK of AAPL at 2000 a share is no share at all.
+        let t = trades(&sixty_forty(50.0, 50.0, 3.0), 0.0).expect("targets sum to 100");
+        assert!(t.iter().all(|t| t.ticker != "AAPL"), "{t:?}");
     }
 
     #[test]
     fn cash_to_deploy_produces_buys_only() {
-        let t = trades(&sixty_forty(50.0, 50.0, 3.0), 1000.0).expect("targets sum to 100");
+        let t = trades(&sixty_forty(50.0, 50.0, 3.0), 10_000.0).expect("targets sum to 100");
         assert!(!t.is_empty());
         assert!(
             t.iter().all(|t| t.side == Side::Buy),
@@ -769,9 +874,10 @@ mod tests {
 
     #[test]
     fn cash_to_deploy_spends_no_more_than_the_cash() {
-        let t = trades(&sixty_forty(50.0, 50.0, 3.0), 1000.0).expect("targets sum to 100");
+        let t = trades(&sixty_forty(50.0, 50.0, 3.0), 10_000.0).expect("targets sum to 100");
         let spent: f64 = t.iter().map(|t| t.amount).sum();
-        assert!(spent <= 1000.0 + 1e-6, "spent {spent} of 1000");
+        assert!(spent <= 10_000.0 + 1e-6, "spent {spent} of 10000");
+        assert!((leftover(&t, 10_000.0) - (10_000.0 - spent)).abs() < 1e-9);
     }
 
     #[test]
@@ -790,6 +896,90 @@ mod tests {
             trades(&v, 0.0),
             Err(RebalanceError::NothingPriced)
         ));
+    }
+
+    #[test]
+    fn a_new_portfolio_is_bought_into_equally_from_cash() {
+        // Nothing held yet: the cash is the whole pot, split by target, priced per share from
+        // the quote in base currency, and rounded down to whole shares.
+        let p = portfolio(
+            3.0,
+            vec![
+                holding("h1", "EQNR.OL", 0.0, 0.0, "NOK", 50.0),
+                holding("h2", "AAPL", 0.0, 0.0, "NOK", 50.0),
+            ],
+        );
+        let v = view_portfolio(&p, "NOK", &cache());
+        let t = trades(&v, 10_000.0).expect("cash makes an empty portfolio rebalanceable");
+        assert_eq!(t.len(), 2);
+        assert!(t.iter().all(|x| x.side == Side::Buy));
+        let eqnr = t.iter().find(|x| x.ticker == "EQNR.OL").expect("eqnr");
+        assert_eq!(eqnr.shares, 18.0, "5000 / 270 = 18.5");
+        let aapl = t.iter().find(|x| x.ticker == "AAPL").expect("aapl");
+        assert_eq!(aapl.shares, 2.0, "5000 / 2000 NOK = 2.5");
+        assert!((leftover(&t, 10_000.0) - (10_000.0 - 4860.0 - 4000.0)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn applying_a_buy_in_adds_the_shares_and_what_they_cost_in_the_cost_currency() {
+        let mut p = portfolio(
+            3.0,
+            vec![
+                holding("h1", "EQNR.OL", 0.0, 0.0, "NOK", 50.0),
+                holding("h2", "AAPL", 0.0, 0.0, "USD", 50.0),
+            ],
+        );
+        let t = trades(&view_portfolio(&p, "NOK", &cache()), 10_000.0).expect("trades");
+        apply_trades(&mut p, &t, &cache()).expect("applied");
+        assert_eq!(p.holdings[0].shares, 18.0);
+        assert!((p.holdings[0].cost_basis - 4860.0).abs() < 1e-9);
+        assert_eq!(p.holdings[1].shares, 2.0);
+        assert!(
+            (p.holdings[1].cost_basis - 400.0).abs() < 1e-9,
+            "two shares at 200 USD, kept in USD"
+        );
+    }
+
+    #[test]
+    fn applying_a_sell_keeps_the_average_cost_of_what_is_left() {
+        let mut p = portfolio(
+            3.0,
+            vec![
+                holding("h1", "EQNR.OL", 10.0, 2000.0, "NOK", 50.0),
+                holding("h2", "AAPL", 0.9, 1800.0, "NOK", 50.0),
+            ],
+        );
+        let t = trades(&view_portfolio(&p, "NOK", &cache()), 0.0).expect("trades");
+        apply_trades(&mut p, &t, &cache()).expect("applied");
+        assert_eq!(p.holdings[0].shares, 8.0, "1.67 to sell rounds up to 2");
+        assert!(
+            (p.holdings[0].cost_basis - 1600.0).abs() < 1e-9,
+            "still 200 a share"
+        );
+    }
+
+    #[test]
+    fn a_buy_with_no_rate_for_its_cost_currency_applies_nothing() {
+        let mut p = portfolio(
+            3.0,
+            vec![
+                holding("h1", "EQNR.OL", 0.0, 0.0, "NOK", 50.0),
+                holding("h2", "AAPL", 0.0, 0.0, "USD", 50.0),
+            ],
+        );
+        let t = trades(&view_portfolio(&p, "NOK", &cache()), 10_000.0).expect("trades");
+        // Cost kept in SEK, quoted in USD, and no USDSEK rate cached.
+        p.holdings[1].cost_currency = "SEK".into();
+        let no_usd = cache();
+        assert!(apply_trades(&mut p, &t, &no_usd).is_err());
+        assert_eq!(p.holdings[0].shares, 0.0, "not half-applied");
+    }
+
+    #[test]
+    fn a_new_portfolio_without_cash_says_so_rather_than_blaming_prices() {
+        let p = portfolio(3.0, vec![holding("h1", "EQNR.OL", 0.0, 0.0, "NOK", 100.0)]);
+        let v = view_portfolio(&p, "NOK", &cache());
+        assert!(matches!(trades(&v, 0.0), Err(RebalanceError::NothingHeld)));
     }
 
     #[test]

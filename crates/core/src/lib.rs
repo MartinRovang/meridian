@@ -11,6 +11,7 @@ pub mod energy;
 pub mod history;
 pub mod import;
 pub mod optimize;
+pub mod outliers;
 pub mod par;
 pub mod quotes;
 pub mod rules;

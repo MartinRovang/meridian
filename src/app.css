@@ -89,6 +89,7 @@ body { -webkit-font-smoothing: antialiased; overflow: hidden; }
   padding: 18px 20px; background: var(--color-surface);
 }
 .panel-head { font-size: 13px; color: var(--color-neutral-500); margin-bottom: 14px; }
+.panel-head.with-action { display: flex; justify-content: space-between; align-items: center; }
 
 .alloc { display: flex; align-items: center; gap: 20px; }
 .donut { width: 160px; height: 160px; flex: 0 0 160px; }

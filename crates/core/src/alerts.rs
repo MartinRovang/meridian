@@ -274,6 +274,7 @@ mod tests {
             shares: 10.0,
             price,
             currency: "NOK".into(),
+            price_base: price,
             value: if priced { 1000.0 } else { 0.0 },
             day_pct,
             pl: 0.0,

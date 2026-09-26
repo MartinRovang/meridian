@@ -13,6 +13,7 @@ import { Alerts } from './screens/Alerts'
 import { Rules } from './screens/Rules'
 import { Energy } from './screens/Energy'
 import { useApp } from './store'
+import { ConfirmHost } from './Confirm'
 
 const TITLES: Record<string, [string, string]> = {
   dashboard: ['Overview', 'Portfolio overview'],
@@ -99,6 +100,7 @@ export function App() {
           <p className="text-muted">{title} is not built yet.</p>
         )}
       </main>
+      <ConfirmHost />
     </div>
   )
 }

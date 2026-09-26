@@ -3,3 +3,4 @@
 node_modules
 *.tsbuildinfo
 src-tauri/gen/
+.playwright-mcp/

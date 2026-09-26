@@ -5,6 +5,7 @@ import { Import } from './Import'
 import { SkelScreen } from '../Skeleton'
 import { TickerSearch, type Hit } from '../TickerSearch'
 import { useApp, type Holding } from '../store'
+import { ask } from '../Confirm'
 
 // Every mutation ends in load(): the screen shows what the server stored, never what the client
 // hoped it stored.
@@ -18,8 +19,8 @@ export function Builder() {
   const [draft, setDraft] = useState<Draft>(EMPTY)
   const [err, setErr] = useState('')
   // ponytail: an inline input rather than window.prompt, which is the one JS dialog the
-  // packaged webview cannot be relied on to show. confirm() stays: it is implemented, and if it
-  // ever were not, the failure is "the delete does not happen".
+  // packaged webview cannot be relied on to show. Confirmations go through ask() for the same
+  // reason window.confirm does not: it shows as a native dialog titled with the page's address.
   const [naming, setNaming] = useState<{ mode: 'new' | 'rename'; value: string } | null>(null)
   if (!state) return <SkelScreen />
 
@@ -34,6 +35,11 @@ export function Builder() {
     }
     await reload()
   }
+  // Ask in the app, then run: the whole of every destructive button here.
+  const askThen = (title: string, body: string, action: string, f: () => Promise<unknown>) =>
+    void ask(title, body, action).then((ok) => {
+      if (ok) void run(f)
+    })
 
   const commitName = () => {
     const name = naming?.value.trim()
@@ -54,8 +60,7 @@ export function Builder() {
     // Named, and with the count, because the holdings go with it.
     const n = p.holdings.length
     const what = n === 1 ? 'its 1 holding' : `its ${n} holdings`
-    if (!confirm(`Delete "${p.name}" and ${what}? This cannot be undone.`)) return
-    void run(async () => {
+    askThen(`Delete "${p.name}"?`, `This deletes it and ${what}. It cannot be undone.`, 'Delete', async () => {
       await patch(`/api/portfolio/${p.id}`, { delete: true })
       setPid('')
     })
@@ -189,6 +194,20 @@ export function Builder() {
               Targets sum to {pct(targetSum)}
               {Math.abs(targetSum - 100) < 0.05 ? '' : ', not 100%'}
             </span>
+            <button
+              className="btn btn-secondary"
+              disabled={!p.holdings.length}
+              onClick={() =>
+                askThen(
+                  'Equal weight?',
+                  `All ${p.holdings.length} holdings in "${p.name}" get the same target.`,
+                  'Equal weight',
+                  () => post('/api/targets', { portfolio: p.id, equal: true }),
+                )
+              }
+            >
+              Equal weight
+            </button>
           </div>
 
           <table className="table">
@@ -233,6 +252,8 @@ export function Builder() {
                       className="input cell"
                       type="number"
                       step="any"
+                      // Keyed on the value so "Equal weight" shows up without a remount.
+                      key={h.target_pct}
                       defaultValue={h.target_pct}
                       onBlur={(e) => saveHolding(h, 'target', e.target.value)}
                     />
@@ -241,11 +262,11 @@ export function Builder() {
                     <button
                       className="btn btn-ghost"
                       title={`Remove ${h.ticker}`}
-                      onClick={() => {
-                        if (confirm(`Remove ${h.ticker} from "${p.name}"?`)) {
-                          void run(() => del(`/api/holding/${h.id}`))
-                        }
-                      }}
+                      onClick={() =>
+                        askThen(`Remove ${h.ticker}?`, `It is removed from "${p.name}".`, 'Remove', () =>
+                          del(`/api/holding/${h.id}`),
+                        )
+                      }
                     >
                       <i className="ph ph-trash" />
                     </button>
